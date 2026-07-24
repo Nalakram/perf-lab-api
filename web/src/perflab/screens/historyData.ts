@@ -1,30 +1,16 @@
 // Pure data helpers for HistoryScreen — no React / API imports, so they are
 // unit-testable through their interface (the screen composes them into cards).
-import type { StateHistorySnapshotRead, UnifiedStateVector, WorkoutLogSummary } from "@/types";
+// The state-vector reductions (readiness/fatigue/aerobic) live in the shared
+// ../stateVector module; only the History-specific window + weekly-load math is here.
+import type { StateHistorySnapshotRead, WorkoutLogSummary } from "@/types";
 
 export const RANGES = ["4w", "12w", "All"] as const;
 export type Range = (typeof RANGES)[number];
 export const RANGE_WEEKS: Record<Range, number> = { "4w": 4, "12w": 12, All: 52 };
 
-/** The twin's aerobic capacity ceiling (0–650 axis), used to fill the track. */
+/** History's aerobic-capacity track ceiling (0–650 axis). Local display choice —
+ *  deliberately not unified with the projection screen's soft display maxima. */
 export const AEROBIC_CEILING = 650;
-
-/** Readiness proxy ~ (1 − mean fatigue), scaled 0–100 — mirrors the backend
- *  `overall_readiness` intent for the trend line (same as Overview). */
-export function stateReadinessProxy(sv: UnifiedStateVector): number {
-  const f = sv.fatigue_f;
-  const vals = f
-    ? [f.cns, f.muscular, f.metabolic, f.structural, f.tendon, f.grip]
-    : [sv.f_nm_central, sv.f_nm_peripheral, sv.f_met_systemic, sv.f_struct_damage];
-  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-  return Math.round(Math.max(0, Math.min(100, 100 - mean)));
-}
-
-/** Aerobic-capacity value for a snapshot: the decomposed axis when present,
- *  else the legacy scalar mirror. */
-export function aerobicValue(sv: StateHistorySnapshotRead): number {
-  return sv.capacity_x?.aerobic ?? sv.c_met_aerobic;
-}
 
 /** Snapshots within the last `weeks` weeks (module-level so the `Date.now()`
  *  clock read stays out of the component render body). */

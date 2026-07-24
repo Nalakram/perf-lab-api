@@ -19,6 +19,7 @@ import { usePerfLab } from "../store";
 import { useAuthedResource, type Resource } from "../useAuthedResource";
 import { Card, MetricBar, Pill, ReadinessRing, SectionLabel, SyncChip } from "../ui";
 import { Chart, Line, Marker, Radar, useVizTheme } from "../viz";
+import { meanFatigue, relativeTime } from "../stateVector";
 import { CapacityView } from "./twin/CapacityView";
 import {
   CAP_CFG,
@@ -39,27 +40,8 @@ import {
 
 const MONTHS = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
 
-// Mean of the six fatigue axes (0–100), decomposed vector when present else the
-// legacy scalars. Copied module-local from OverviewScreen (not shared) so the
-// Twin owns its own timeline arithmetic.
-function meanFatigue(sv: StateHistorySnapshotRead): number {
-  const f = sv.fatigue_f;
-  const vals = f
-    ? [f.cns, f.muscular, f.metabolic, f.structural, f.tendon, f.grip]
-    : [sv.f_nm_central, sv.f_nm_peripheral, sv.f_met_systemic, sv.f_struct_damage];
-  return vals.reduce((a, b) => a + b, 0) / vals.length;
-}
-
-/** Compact "Xh ago" for the sync chip. */
-function relativeTime(iso: string): string {
-  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 60) return "just now";
-  const m = Math.floor(secs / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
+// meanFatigue + relativeTime now come from the shared ../stateVector module
+// (imported above) — no longer copied module-local.
 
 /** "Viewing" date + relative word from a recorded snapshot's timestamp. */
 function viewingLabel(iso: string): { date: string; when: string } {

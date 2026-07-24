@@ -7,7 +7,8 @@ import { usePerfLab } from "../store";
 import { useAuthedResource } from "../useAuthedResource";
 import { Card, ScreenHeader, SectionLabel, Track } from "../ui";
 import { Chart, Area, Axis, Bars, TableView, useChart, useVizTheme } from "../viz";
-import { AEROBIC_CEILING, RANGES, RANGE_WEEKS, aerobicValue, filterHistoryWindow, stateReadinessProxy, weeklyLoad, type Range } from "./historyData";
+import { aerobicValue, fatigueDisplayProxy } from "../stateVector";
+import { AEROBIC_CEILING, RANGES, RANGE_WEEKS, filterHistoryWindow, weeklyLoad, type Range } from "./historyData";
 
 /** Compact load formatter — real volume-load totals run large, so thousands
  *  collapse to "12.4k". */
@@ -308,7 +309,7 @@ export function HistoryScreen() {
   const allHistory = token ? historyRes.data : null;
   const visibleHistory = allHistory ? filterHistoryWindow(allHistory, weeks) : null;
   const hasHistory = !!(visibleHistory && visibleHistory.length);
-  const readinessSeries = hasHistory ? visibleHistory!.map(stateReadinessProxy) : [];
+  const readinessSeries = hasHistory ? visibleHistory!.map(fatigueDisplayProxy) : [];
   const N = readinessSeries.length;
   const latestReadiness = hasHistory ? readinessSeries[N - 1] : null;
   const hDiff = N >= 2 ? readinessSeries[N - 1] - readinessSeries[0] : null;
