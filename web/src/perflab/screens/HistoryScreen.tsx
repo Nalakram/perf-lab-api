@@ -1,43 +1,16 @@
 // src/perflab/screens/HistoryScreen.tsx
+import { useState, type ReactNode } from "react";
 import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
-import type { BenchmarkObservationRead, StateHistorySnapshotRead, UnifiedStateVector, WellnessSampleOut, WorkoutLogSummary } from "@/types";
+import type { BenchmarkObservationRead, StateHistorySnapshotRead, WellnessSampleOut, WorkoutLogSummary } from "@/types";
 import { usePerfLab } from "../store";
 import { useAuthedResource } from "../useAuthedResource";
 import { Card, ScreenHeader, SectionLabel, Track } from "../ui";
 import { Chart, Area, Axis, Bars, TableView, useChart, useVizTheme } from "../viz";
-import { DAYS } from "../sim";
-
-/** Readiness proxy ~ (1 − mean fatigue), scaled 0–100 — mirrors the backend
- *  `overall_readiness` intent for the trend line (same as Overview). */
-function stateReadinessProxy(sv: UnifiedStateVector): number {
-  const f = sv.fatigue_f;
-  const vals = f
-    ? [f.cns, f.muscular, f.metabolic, f.structural, f.tendon, f.grip]
-    : [sv.f_nm_central, sv.f_nm_peripheral, sv.f_met_systemic, sv.f_struct_damage];
-  const mean = vals.reduce((a, b) => a + b, 0) / vals.length;
-  return Math.round(Math.max(0, Math.min(100, 100 - mean)));
-}
-
-/** Aggregate logged workouts into the last `weeks` Mon-anchored weekly load totals
- *  (oldest→newest). Returns null when there's nothing to show. */
-function weeklyLoad(workouts: WorkoutLogSummary[] | null, weeks = 12): number[] | null {
-  if (!workouts || workouts.length === 0) return null;
-  const msWeek = 7 * 864e5;
-  const now = Date.now();
-  const buckets = new Array(weeks).fill(0);
-  let any = false;
-  for (const w of workouts) {
-    const t = new Date(w.session_timestamp ?? w.logged_at).getTime();
-    if (Number.isNaN(t)) continue;
-    const idx = weeks - 1 - Math.floor((now - t) / msWeek);
-    if (idx >= 0 && idx < weeks) { buckets[idx] += w.total_volume_load ?? 0; any = true; }
-  }
-  return any ? buckets : null;
-}
+import { AEROBIC_CEILING, RANGES, RANGE_WEEKS, aerobicValue, filterHistoryWindow, stateReadinessProxy, weeklyLoad, type Range } from "./historyData";
 
 /** Compact load formatter — real volume-load totals run large, so thousands
- *  collapse to "12.4k" while the mock's small numbers stay whole. */
+ *  collapse to "12.4k". */
 function fmtLoad(v: number): string {
   if (!Number.isFinite(v)) return "—";
   return v >= 1000 ? `${(v / 1000).toFixed(1)}k` : `${Math.round(v)}`;
@@ -138,21 +111,106 @@ const fmtDay = (iso: string): string => {
   const d = new Date(iso);
   return Number.isNaN(d.getTime()) ? iso : `${d.getDate()} ${MONTHS[d.getMonth()]}`;
 };
+const fmtMonth = (iso: string): string => {
+  const d = new Date(iso);
+  return Number.isNaN(d.getTime()) ? "" : MONTHS[d.getMonth()];
+};
 const cell = (v: number | null, suffix = ""): string => (v == null ? "—" : `${v}${suffix}`);
+
+// A small honest note used wherever there is no real data to show.
+function CardNote({ children }: { children: ReactNode }) {
+  return <div className="text-[13px] font-medium leading-[1.5] text-mute">{children}</div>;
+}
+
+// VO₂max progression — derived from the athlete's real field-test benchmark
+// observations (the same series the field-test log below shows), newest first.
+// No signed-in athlete sees a fabricated curve: guests and empty histories get
+// an honest prompt instead.
+function VO2maxCard({ token, obs, loading, error }: {
+  token: string | null;
+  obs: BenchmarkObservationRead[] | null;
+  loading: boolean;
+  error: unknown;
+}) {
+  const shell = (inner: ReactNode) => (
+    <Card className="border-mint/[0.18] p-[18px]" style={{ background: "linear-gradient(120deg,#0f1f1c,#111419 60%)" }}>
+      <div className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-[#9ad6c8]">VO₂max progression</div>
+      {inner}
+    </Card>
+  );
+  if (!token) return shell(<div className="mt-3"><CardNote>Sign in and log a field test to track your VO₂max.</CardNote></div>);
+  if (loading) return shell(<div className="mt-3"><CardNote>Loading field tests…</CardNote></div>);
+  if (error || !obs || obs.length === 0) return shell(<div className="mt-3"><CardNote>No field tests logged yet — record one in Assess.</CardNote></div>);
+
+  const latest = obs[0].raw_value;
+  const spark = obs.slice(0, 4).reverse(); // oldest→newest of the last few
+  const first = spark[0];
+  const delta = spark.length >= 2 ? latest - first.raw_value : null;
+  return shell(
+    <>
+      <div className="mt-3 flex items-end gap-2">
+        <span className="font-mono text-[28px] font-semibold leading-none text-ink">{latest.toFixed(1)}</span>
+        {delta != null && (
+          <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
+            {delta >= 0 ? "+" : "−"}{Math.abs(delta).toFixed(1)} since {fmtMonth(first.observed_at)}
+          </span>
+        )}
+      </div>
+      <div className="mt-3 font-mono text-[11px] leading-none text-mute">
+        {spark.map((o) => o.raw_value.toFixed(1)).join(" → ")}
+      </div>
+    </>,
+  );
+}
+
+// Aerobic capacity — the decomposed aerobic capacity axis from the latest real
+// snapshot, compared against the oldest snapshot currently loaded (the window
+// start, not a durable "base"). Track fills against the twin's aerobic ceiling.
+function AerobicCapacityCard({ token, latest, windowStart }: {
+  token: string | null;
+  latest: StateHistorySnapshotRead | null;
+  windowStart: StateHistorySnapshotRead | null;
+}) {
+  const shell = (inner: ReactNode) => (
+    <Card className="p-[18px]">
+      <div className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-faint">Aerobic capacity</div>
+      {inner}
+    </Card>
+  );
+  if (!token) return shell(<div className="mt-3"><CardNote>Sign in to track your aerobic capacity.</CardNote></div>);
+  if (!latest) return shell(<div className="mt-3"><CardNote>Not enough history yet — log training to build the trend.</CardNote></div>);
+
+  const val = aerobicValue(latest);
+  const delta = windowStart ? val - aerobicValue(windowStart) : null;
+  const pct = Math.max(0, Math.min(100, (val / AEROBIC_CEILING) * 100));
+  return shell(
+    <>
+      <div className="mt-3 flex items-end gap-2">
+        <span className="font-mono text-[28px] font-semibold leading-none text-ink">{Math.round(val)}</span>
+        {delta != null && (
+          <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
+            {delta >= 0 ? "+" : "−"}{Math.abs(Math.round(delta))} vs window start
+          </span>
+        )}
+      </div>
+      <Track pct={pct} background="linear-gradient(90deg,var(--ac),#a7e36e)" className="mt-3 h-[6px]" />
+    </>,
+  );
+}
 
 // Recent wellness — real daily samples from GET /v1/wellness. Renders live rows
 // when the athlete has logged check-ins; guests and empty histories get a note
-// rather than the prototype's mock series.
+// rather than a mock series.
 function RecentWellnessCard() {
   const { token } = useAuth();
   const { data, loading, error } = useAuthedResource<WellnessSampleOut[]>((t) => api.listWellness(t, 10), []);
 
   const body = !token ? (
-    <div className="text-[13px] font-medium leading-[1.5] text-mute">Sign in and log a check-in to track your wellness here.</div>
+    <CardNote>Sign in and log a check-in to track your wellness here.</CardNote>
   ) : loading ? (
     <div className="text-[13px] font-medium text-mute">Loading recent samples…</div>
   ) : error || !data || data.length === 0 ? (
-    <div className="text-[13px] font-medium leading-[1.5] text-mute">No wellness logged yet — use Check-in to record sleep, HRV and resting HR.</div>
+    <CardNote>No wellness logged yet — use Check-in to record sleep, HRV and resting HR.</CardNote>
   ) : (
     <>
       <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] gap-2 border-b border-white/[0.07] py-[10px] font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.1em] text-dim">
@@ -178,27 +236,20 @@ function RecentWellnessCard() {
   );
 }
 
-function FieldTestLogCard() {
-  const { token } = useAuth();
-  const { data, loading, error } = useAuthedResource<BenchmarkObservationRead[]>(
-    (t) => api.listBenchmarkObservations(t, { benchmarkCode: FIELD_TEST_CODE, limit: 10 }),
-    [],
-  );
-
+function FieldTestLogCard({ token, data, loading, error }: {
+  token: string | null;
+  data: BenchmarkObservationRead[] | null;
+  loading: boolean;
+  error: unknown;
+}) {
   const body = !token ? (
-    <div className="text-[13px] font-medium leading-[1.5] text-mute">
-      Sign in and log a field test to see your results here.
-    </div>
+    <CardNote>Sign in and log a field test to see your results here.</CardNote>
   ) : loading ? (
     <div className="text-[13px] font-medium text-mute">Loading field tests…</div>
   ) : error ? (
-    <div className="text-[13px] font-medium leading-[1.5] text-mute">
-      Couldn&apos;t load your field tests — try again.
-    </div>
+    <CardNote>Couldn&apos;t load your field tests — try again.</CardNote>
   ) : !data || data.length === 0 ? (
-    <div className="text-[13px] font-medium leading-[1.5] text-mute">
-      No field tests logged yet — record one in Assess.
-    </div>
+    <CardNote>No field tests logged yet — record one in Assess.</CardNote>
   ) : (
     <TableView
       columns={[
@@ -236,29 +287,39 @@ function FieldTestLogCard() {
   );
 }
 
-const LOAD_BARS: [number, boolean][] = [
-  [62, true], [58, true], [70, true], [65, true], [72, true], [48, false], [88, true], [82, true], [60, true], [90, true], [76, true], [74, true],
-];
-
 export function HistoryScreen() {
   const { actions } = usePerfLab();
   const { token } = useAuth();
   const { accent, colors } = useVizTheme();
+  const [range, setRange] = useState<Range>("12w");
 
-  // Real trends when signed in; the deterministic sim backs guests / empty history.
-  const historyRes = useAuthedResource<StateHistorySnapshotRead[]>((t) => api.getStateHistory(t, 22), []);
+  // Real trends only — signed-in athletes never see a fabricated series. A large
+  // history fetch backs the "All" window; the toggle filters client-side.
+  const historyRes = useAuthedResource<StateHistorySnapshotRead[]>((t) => api.getStateHistory(t, 365), []);
   const workoutsRes = useAuthedResource<WorkoutLogSummary[]>((t) => api.listWorkouts(t, 300), []);
+  const obsRes = useAuthedResource<BenchmarkObservationRead[]>(
+    (t) => api.listBenchmarkObservations(t, { benchmarkCode: FIELD_TEST_CODE, limit: 10 }),
+    [],
+  );
 
-  const historyRows = historyRes.data;
-  const usingRealHistory = !!(token && historyRows && historyRows.length);
-  const realReadiness = usingRealHistory ? historyRows!.map(stateReadinessProxy) : null;
-  const readinessSeries = realReadiness ?? DAYS.map((d) => d.readiness);
+  const weeks = RANGE_WEEKS[range];
+
+  // Readiness history, filtered to the selected window (real data only).
+  const allHistory = token ? historyRes.data : null;
+  const visibleHistory = allHistory ? filterHistoryWindow(allHistory, weeks) : null;
+  const hasHistory = !!(visibleHistory && visibleHistory.length);
+  const readinessSeries = hasHistory ? visibleHistory!.map(stateReadinessProxy) : [];
   const N = readinessSeries.length;
-  const hDiff = readinessSeries[N - 1] - readinessSeries[0];
-  const hDelta = `${hDiff >= 0 ? "+" : ""}${hDiff} vs 3w ago`;
+  const latestReadiness = hasHistory ? readinessSeries[N - 1] : null;
+  const hDiff = N >= 2 ? readinessSeries[N - 1] - readinessSeries[0] : null;
+  const hDelta = hDiff == null ? "" : `${hDiff >= 0 ? "+" : "−"}${Math.abs(hDiff)} vs window start`;
+  const latestSnap = hasHistory ? visibleHistory![N - 1] : null;
+  const windowStartSnap = hasHistory ? visibleHistory![0] : null;
 
-  const realLoad = token ? weeklyLoad(workoutsRes.data) : null;
-  const loadSeries = realLoad ?? LOAD_BARS.map(([h]) => h);
+  // Weekly load over the same window (real workouts only; null → empty state).
+  const realLoad = token ? weeklyLoad(workoutsRes.data, weeks) : null;
+  const hasLoad = !!(realLoad && realLoad.length);
+  const loadSeries = realLoad ?? [];
   const loadMax = Math.max(1, ...loadSeries) * 1.1;
   const nowIdx = loadSeries.length - 1;
 
@@ -266,7 +327,7 @@ export function HistoryScreen() {
   const thisWeek = loadSeries[nowIdx] ?? 0;
   const lastWeek = loadSeries.length >= 2 ? loadSeries[nowIdx - 1] : null;
   const avgLoad = loadSeries.length ? loadSeries.reduce((a, b) => a + b, 0) / loadSeries.length : 0;
-  const peakVal = Math.max(0, ...loadSeries);
+  const peakVal = loadSeries.length ? Math.max(0, ...loadSeries) : 0;
   const peakWk = loadSeries.indexOf(peakVal) + 1;
   const wowDelta = lastWeek && lastWeek > 0 ? (thisWeek - lastWeek) / lastWeek : null;
 
@@ -276,25 +337,28 @@ export function HistoryScreen() {
   const chronic = recent4.length ? recent4.reduce((a, b) => a + b, 0) / recent4.length : 0;
   const acwr = chronic > 0 && recent4.filter((v) => v > 0).length >= 2 ? thisWeek / chronic : null;
 
-  // Time-travel the twin from a clicked readiness dot. On live history we hand the
-  // twin the CLICKED ROW's snapshot_id (its durable identity), never the chart
-  // index — the Twin resolves that id to a local scrub position. The sim fallback
-  // (guest / empty history) still keys on the fixture day index.
+  // Time-travel the twin from a clicked readiness dot — hand it the CLICKED ROW's
+  // snapshot_id (its durable identity), never the chart index.
   const goDay = (i: number) => {
-    if (usingRealHistory && historyRows![i]) {
-      actions.setSelectedTwinSnapshot(historyRows![i].snapshot_id);
-    } else {
-      actions.setTwinDay(i);
+    if (hasHistory && visibleHistory![i]) {
+      actions.setSelectedTwinSnapshot(visibleHistory![i].snapshot_id);
+      actions.setScreen("twin");
     }
-    actions.setScreen("twin");
   };
 
   return (
     <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
-      <ScreenHeader title="History" subtitle="How your twin and assessments have moved over the current 7-week build block.">
+      <ScreenHeader title="History" subtitle="How your twin and assessments have moved over your recent training.">
         <div className="flex gap-[7px] rounded-[9px] border border-white/[0.08] p-[3px]">
-          {["4w", "12w", "All"].map((t) => (
-            <span key={t} className={`cursor-pointer rounded-[7px] px-[11px] py-[7px] text-[11px] font-semibold leading-none ${t === "12w" ? "bg-ink text-[#0a0c10]" : "text-faint"}`}>{t}</span>
+          {RANGES.map((t) => (
+            <button
+              key={t}
+              type="button"
+              onClick={() => setRange(t)}
+              className={`cursor-pointer rounded-[7px] px-[11px] py-[7px] text-[11px] font-semibold leading-none ${t === range ? "bg-ink text-[#0a0c10]" : "text-faint"}`}
+            >
+              {t}
+            </button>
           ))}
         </div>
       </ScreenHeader>
@@ -305,37 +369,37 @@ export function HistoryScreen() {
             <div>
               <SectionLabel>Readiness</SectionLabel>
               <div className="mt-2 flex items-end gap-2">
-                <span className="font-mono text-[30px] font-semibold leading-none text-ink">64</span>
-                <span className="mb-1 text-[11px] font-medium leading-none text-good">{hDelta}</span>
+                <span className="font-mono text-[30px] font-semibold leading-none text-ink">{latestReadiness ?? "—"}</span>
+                {hDelta && <span className={`mb-1 text-[11px] font-medium leading-none ${hDiff != null && hDiff >= 0 ? "text-good" : "text-hot"}`}>{hDelta}</span>}
               </div>
             </div>
-            <div className="text-right font-mono text-[10px] leading-none text-dim">3-week · click to time-travel</div>
+            <div className="text-right font-mono text-[10px] leading-none text-dim">click a point to time-travel</div>
           </div>
-          <Chart
-            width={600}
-            height={180}
-            padding={{ top: 14, right: 10, bottom: 15, left: 10 }}
-            xDomain={[0, N - 1]}
-            yDomain={[20, 100]}
-            ariaLabel="Readiness across the current build block"
-            className="mt-1 h-[170px] w-full"
-          >
-            <Axis y yTicks={3} />
-            <Area data={readinessSeries.map((r, i) => [i, r] as [number, number])} color={accent} />
-            <DayMarkers readiness={readinessSeries} onPick={goDay} color={accent} />
-          </Chart>
+          {!token ? (
+            <div className="flex h-[170px] items-center justify-center"><CardNote>Sign in to see your readiness trend.</CardNote></div>
+          ) : historyRes.loading ? (
+            <div className="flex h-[170px] items-center justify-center"><div className="text-[13px] font-medium text-mute">Loading history…</div></div>
+          ) : !hasHistory || N < 2 ? (
+            <div className="flex h-[170px] items-center justify-center"><CardNote>Not enough history in this window yet — log training or widen the range.</CardNote></div>
+          ) : (
+            <Chart
+              width={600}
+              height={180}
+              padding={{ top: 14, right: 10, bottom: 15, left: 10 }}
+              xDomain={[0, N - 1]}
+              yDomain={[20, 100]}
+              ariaLabel="Readiness across the selected window"
+              className="mt-1 h-[170px] w-full"
+            >
+              <Axis y yTicks={3} />
+              <Area data={readinessSeries.map((r, i) => [i, r] as [number, number])} color={accent} />
+              <DayMarkers readiness={readinessSeries} onPick={goDay} color={accent} />
+            </Chart>
+          )}
         </Card>
         <div className="flex flex-col gap-4">
-          <Card className="border-mint/[0.18] p-[18px]" style={{ background: "linear-gradient(120deg,#0f1f1c,#111419 60%)" }}>
-            <div className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-[#9ad6c8]">VO₂max progression</div>
-            <div className="mt-3 flex items-end gap-2"><span className="font-mono text-[28px] font-semibold leading-none text-ink">58.4</span><span className="mb-1 text-[11px] font-medium leading-none text-good">+4.3 since Apr</span></div>
-            <div className="mt-3 font-mono text-[11px] leading-none text-mute">54.1 → 55.2 → 56.9 → 58.4</div>
-          </Card>
-          <Card className="p-[18px]">
-            <div className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-faint">Aerobic capacity</div>
-            <div className="mt-3 flex items-end gap-2"><span className="font-mono text-[28px] font-semibold leading-none text-ink">320</span><span className="mb-1 text-[11px] font-medium leading-none text-good">+40 vs base</span></div>
-            <Track pct={80} background="linear-gradient(90deg,var(--ac),#a7e36e)" className="mt-3 h-[6px]" />
-          </Card>
+          <VO2maxCard token={token} obs={obsRes.data} loading={obsRes.loading} error={obsRes.error} />
+          <AerobicCapacityCard token={token} latest={latestSnap} windowStart={windowStartSnap} />
         </div>
       </div>
 
@@ -345,51 +409,61 @@ export function HistoryScreen() {
         <Card className="px-[22px] py-5">
           <div className="mb-4 flex items-center justify-between">
             <SectionLabel>Weekly training load</SectionLabel>
-            <div className="text-[11px] font-medium leading-none text-dim">volume load · last 12 weeks</div>
+            <div className="text-[11px] font-medium leading-none text-dim">volume load · last {weeks} weeks</div>
           </div>
-          <div className="mb-4 flex flex-wrap gap-x-7 gap-y-3">
-            <div>
-              <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">This week</div>
-              <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(thisWeek)}</div>
-            </div>
-            <div>
-              <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">vs last wk</div>
-              <div className={`mt-[6px] font-mono text-[22px] font-semibold leading-none ${wowDelta == null ? "text-dim" : wowDelta >= 0 ? "text-good" : "text-hot"}`}>
-                {wowDelta == null ? "—" : `${wowDelta >= 0 ? "+" : "−"}${Math.abs(wowDelta * 100).toFixed(0)}%`}
+          {!token ? (
+            <div className="flex h-[140px] items-center justify-center"><CardNote>Sign in to see your training load.</CardNote></div>
+          ) : workoutsRes.loading ? (
+            <div className="flex h-[140px] items-center justify-center"><div className="text-[13px] font-medium text-mute">Loading training load…</div></div>
+          ) : !hasLoad ? (
+            <div className="flex h-[140px] items-center justify-center"><CardNote>No training logged in this window — log a session or widen the range.</CardNote></div>
+          ) : (
+            <>
+              <div className="mb-4 flex flex-wrap gap-x-7 gap-y-3">
+                <div>
+                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">This week</div>
+                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(thisWeek)}</div>
+                </div>
+                <div>
+                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">vs last wk</div>
+                  <div className={`mt-[6px] font-mono text-[22px] font-semibold leading-none ${wowDelta == null ? "text-dim" : wowDelta >= 0 ? "text-good" : "text-hot"}`}>
+                    {wowDelta == null ? "—" : `${wowDelta >= 0 ? "+" : "−"}${Math.abs(wowDelta * 100).toFixed(0)}%`}
+                  </div>
+                </div>
+                <div>
+                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">{weeks}-wk avg</div>
+                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(avgLoad)}</div>
+                </div>
+                <div>
+                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">Peak</div>
+                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">
+                    {fmtLoad(peakVal)}<span className="ml-[3px] text-[12px] font-medium text-mute">· W{peakWk}</span>
+                  </div>
+                </div>
               </div>
-            </div>
-            <div>
-              <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">12-wk avg</div>
-              <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(avgLoad)}</div>
-            </div>
-            <div>
-              <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">Peak</div>
-              <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">
-                {fmtLoad(peakVal)}<span className="ml-[3px] text-[12px] font-medium text-mute">· W{peakWk}</span>
-              </div>
-            </div>
-          </div>
-          <Chart
-            width={600}
-            height={100}
-            padding={{ top: 6, right: 2, bottom: 2, left: 2 }}
-            yDomain={[0, loadMax]}
-            ariaLabel="Weekly training load, last 12 weeks"
-            className="h-[100px] w-full"
-          >
-            <Bars
-              data={loadSeries.map((v, i) => ({ key: `W${i + 1}`, value: v }))}
-              color="series"
-              baseColor={colors.categorical[1]}
-              emphasisKey={`W${nowIdx + 1}`}
-            />
-          </Chart>
-          <div className="mt-[10px] flex justify-between font-mono text-[9px] leading-none text-dim"><span>W1</span><span>W12 · now</span></div>
+              <Chart
+                width={600}
+                height={100}
+                padding={{ top: 6, right: 2, bottom: 2, left: 2 }}
+                yDomain={[0, loadMax]}
+                ariaLabel={`Weekly training load, last ${weeks} weeks`}
+                className="h-[100px] w-full"
+              >
+                <Bars
+                  data={loadSeries.map((v, i) => ({ key: `W${i + 1}`, value: v }))}
+                  color="series"
+                  baseColor={colors.categorical[1]}
+                  emphasisKey={`W${nowIdx + 1}`}
+                />
+              </Chart>
+              <div className="mt-[10px] flex justify-between font-mono text-[9px] leading-none text-dim"><span>W1</span><span>W{weeks} · now</span></div>
+            </>
+          )}
         </Card>
         <LoadBalanceCard acwr={acwr} acute={thisWeek} chronic={chronic} />
       </div>
 
-      <FieldTestLogCard />
+      <FieldTestLogCard token={token} data={obsRes.data} loading={obsRes.loading} error={obsRes.error} />
     </section>
   );
 }
