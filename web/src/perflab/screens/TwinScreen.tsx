@@ -16,7 +16,7 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { ReadinessScore, StateHistorySnapshotRead, WorkoutPrescription } from "@/types";
 import { usePerfLab } from "../store";
-import { useAuthedResource, type Resource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource, type Resource } from "../useAuthedResource";
 import { Card, MetricBar, Pill, ReadinessRing, SectionLabel, SyncChip } from "../ui";
 import { Chart, Line, Marker, Radar, useVizTheme } from "../viz";
 import { meanFatigue, relativeTime } from "../stateVector";

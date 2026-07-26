@@ -13,7 +13,7 @@ import { usePerfLab, TRAINING_GOALS } from "../store";
 import { Card, Pill, ScreenHeader, SectionLabel, Tile } from "../ui";
 import { Chart, Area, Line, Marker, useVizTheme } from "../viz";
 import { COLORS, readinessColor, readinessWord } from "../sim";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import {
   placeholderProjection,
   dominantAxes,

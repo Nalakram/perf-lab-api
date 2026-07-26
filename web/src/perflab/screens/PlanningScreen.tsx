@@ -12,7 +12,7 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { PlannedSessionRead, ReadinessScore, WorkoutPrescription } from "@/types";
 import { usePerfLab } from "../store";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { Card, MetricBar, ScreenHeader, SectionLabel } from "../ui";
 import { Chart, Bars, Line, Marker, Axis, Legend, useVizTheme } from "../viz";
 import { COLORS, PLAN_DAYS, PLAN_LOAD, PLAN_READY } from "../sim";

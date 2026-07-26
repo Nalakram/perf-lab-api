@@ -9,7 +9,7 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { ApiError, MacrocycleRead, ObjectiveRead } from "@/types";
 import { usePerfLab } from "../store";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { sortObjectives } from "../objectives";
 import { domainLabel } from "../domains";
 import { Card, Pill, ScreenHeader, Track } from "../ui";

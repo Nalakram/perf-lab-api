@@ -11,7 +11,7 @@ import { useAuth } from "@/auth/useAuth";
 import { createMacrocycle, listObjectives } from "@/api/perfLabClient";
 import type { ApiError, MacrocycleCreate, ObjectiveRead } from "@/types";
 import { usePerfLab } from "../store";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { sortObjectives } from "../objectives";
 import { CloseBtn } from "./LogWorkoutModal";
 

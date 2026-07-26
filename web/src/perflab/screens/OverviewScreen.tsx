@@ -4,7 +4,7 @@ import { usePerfLab, DEFAULT_GOAL } from "../store";
 import { Card, ReadinessRing, SectionLabel, SyncChip, Track } from "../ui";
 import { Sparkline, Gauge } from "../viz";
 import { buildCheckin, COLORS, DAYS, readinessColor, readinessNote, readinessWord } from "../sim";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { useAuth } from "@/auth/useAuth";
 import {
   getDashboardOverview,

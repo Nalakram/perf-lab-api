@@ -8,7 +8,7 @@ import type { ApiError, ConnectionStatus, ObjectiveRead, ProfileRead, ProfileUpd
 import { TRAINING_GOALS, usePerfLab } from "../store";
 import type { Settings } from "../store";
 import { DOMAIN_OPTIONS } from "../domains";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { Card, SectionLabel } from "../ui";
 
 const ACCENTS = ["#c6f135", "#45d6c4", "#86b8ff", "#f5c451", "#ff8a5c"];

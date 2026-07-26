@@ -4,7 +4,7 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { BenchmarkObservationRead, StateHistorySnapshotRead, WellnessSampleOut, WorkoutLogSummary } from "@/types";
 import { usePerfLab } from "../store";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { Card, ScreenHeader, SectionLabel, Track } from "../ui";
 import { Chart, Area, Axis, Bars, TableView, useChart, useVizTheme } from "../viz";
 import { aerobicValue, fatigueDisplayProxy } from "../stateVector";
