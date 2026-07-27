@@ -57,6 +57,35 @@ def test_assessment_card_publishes_an_enum_not_a_bare_string() -> None:
     assert {"type": "null"} in variants, "the band must stay nullable (fresh onramp)"
 
 
+def test_onboarding_summary_publishes_the_same_enum() -> None:
+    """The third publisher of the band, and the one that was missed first time.
+
+    `overall_confidence` is the worst-axis rollup — the same canonical band, from
+    the same `confidence_status()` call. It stayed `str` after the other two were
+    typed, so the contract published the band two different ways at once.
+    """
+    prop = _schemas()["OnboardingTwinSummary"]["properties"]["overall_confidence"]
+    enums = [v["enum"] for v in prop["anyOf"] if "enum" in v]
+    assert enums == [EXPECTED], f"expected one enum variant, got {prop}"
+
+
+def test_every_publisher_of_the_band_agrees(  # noqa: D103
+) -> None:
+    """No schema may publish this band as a bare string. Enumerated, not sampled."""
+    schemas = _schemas()
+    offenders: list[str] = []
+    for name, schema in schemas.items():
+        for field, prop in (schema.get("properties") or {}).items():
+            if "confidence" not in field:
+                continue
+            blob = json.dumps(prop)
+            if "established" not in blob:
+                continue  # a different confidence concept (e.g. a numeric score)
+            if "enum" not in blob:
+                offenders.append(f"{name}.{field}")
+    assert offenders == [], f"these publish the band without an enum: {offenders}"
+
+
 def test_state_history_publishes_an_enum_for_every_axis() -> None:
     prop = _schemas()["StateHistorySnapshotRead"]["properties"]["capacity_confidence_status"]
     assert prop["additionalProperties"]["enum"] == EXPECTED, (
@@ -70,6 +99,7 @@ def test_state_history_publishes_an_enum_for_every_axis() -> None:
     [
         ("AssessmentBenchmarkCard", ("properties", "confidence_status")),
         ("StateHistorySnapshotRead", ("properties", "capacity_confidence_status")),
+        ("OnboardingTwinSummary", ("properties", "overall_confidence")),
     ],
 )
 def test_committed_contract_is_not_stale(schema_name: str, pointer: tuple[str, ...]) -> None:

@@ -3010,6 +3010,11 @@
           "overall_confidence": {
             "anyOf": [
               {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
                 "type": "string"
               },
               {

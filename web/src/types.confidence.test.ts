@@ -9,7 +9,7 @@
 //
 // These tests assert the LINKS, not the values, because the values agreeing is
 // exactly what a stale file would still look like.
-import { readFileSync } from "node:fs";
+import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import type { ConfidenceStatus } from "./types";
@@ -49,15 +49,30 @@ describe("the confidence band is generated, not hand-declared", () => {
     expect(gen).not.toMatch(/capacity_confidence_status[\s\S]{0,120}\[key: string\]:\s*string;/);
   });
 
-  it("no screen re-declares the band by hand", () => {
+  it("no source file re-declares the band by hand", () => {
     // The defect this candidate existed to remove: the enum written out again in
     // TypeScript, free to drift from the backend without anything failing.
+    //
+    // Scans the whole tree rather than the one file that had it. Checking only
+    // the known offender would let the next copy land unnoticed, which is the
+    // failure mode this test exists to prevent.
+    const handDeclared = /"established"\s*\|\s*"provisional"\s*\|\s*"insufficient"/;
+    const walk = (dir: string): string[] =>
+      readdirSync(dir, { withFileTypes: true }).flatMap((e) => {
+        const full = join(dir, e.name);
+        if (e.isDirectory()) return walk(full);
+        return /\.tsx?$/.test(e.name) && e.name !== "types.gen.ts" ? [full] : [];
+      });
+    const offenders = walk(WEB_SRC)
+      .filter((f) => f !== __filename)
+      .filter((f) => handDeclared.test(readFileSync(f, "utf8")))
+      .map((f) => f.slice(WEB_SRC.length + 1));
+    expect(offenders).toEqual([]);
+
     const capacityView = readFileSync(
       join(WEB_SRC, "perflab", "screens", "twin", "CapacityView.tsx"),
       "utf8",
     );
-    const handDeclared = /"established"\s*\|\s*"provisional"\s*\|\s*"insufficient"/;
-    expect(capacityView).not.toMatch(handDeclared);
     expect(capacityView).toContain("ConfidenceStatus");
   });
 });

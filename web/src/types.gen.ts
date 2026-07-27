@@ -1983,7 +1983,7 @@ export interface components {
         /** OnboardingTwinSummary */
         OnboardingTwinSummary: {
             /** Overall Confidence */
-            overall_confidence: string | null;
+            overall_confidence: ("established" | "provisional" | "insufficient") | null;
             /** Provisional */
             provisional: boolean;
             /** Seed Status */
