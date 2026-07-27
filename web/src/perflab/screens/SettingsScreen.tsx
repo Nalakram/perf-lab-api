@@ -9,6 +9,7 @@ import { TRAINING_GOALS, usePerfLab } from "../store";
 import type { Settings } from "../store";
 import { DOMAIN_OPTIONS } from "../domains";
 import { useAuthedResource } from "../useAuthedResource";
+import { goalChipsView } from "./goalChipsView";
 import { Card, SectionLabel } from "../ui";
 
 const ACCENTS = ["#c6f135", "#45d6c4", "#86b8ff", "#f5c451", "#ff8a5c"];
@@ -40,14 +41,19 @@ function Seg({ options, value, onChange, className }: { options: string[]; value
 function GoalChips() {
   const auth = useAuth();
   const { state, actions } = usePerfLab();
-  const { data: objectives } = useAuthedResource<ObjectiveRead[]>(
+  const objectivesRes = useAuthedResource<ObjectiveRead[]>(
     (t) => api.listObjectives(t),
     [state.objectivesRefreshKey],
   );
   const [busy, setBusy] = useState<string | null>(null);
   const [err, setErr] = useState<string | null>(null);
 
-  const active = (objectives ?? []).filter((o) => o.status === "active");
+  // A chip grid is not card-shaped, so it consumes the canonical union through
+  // the second sanctioned form — exhaustive narrowing in `goalChipsView` —
+  // rather than through <ResourceState>.
+  const view = goalChipsView(objectivesRes);
+
+  const active = view.objectives.filter((o) => o.status === "active");
   const activeDomains = new Set(active.map((o) => o.domain).filter(Boolean) as string[]);
   // "Bare" goal objectives (no date / target / benchmark) are the ones these chips
   // own and may delete on toggle-off. A dated race or benchmark-linked objective
@@ -92,9 +98,19 @@ function GoalChips() {
       <p className="mb-[10px] mt-[6px] text-[11px] font-medium leading-[1.45] text-faint">
         Pick every discipline you’re training for — each becomes a priority-ranked objective that shapes what your plan emphasizes and which benchmarks Assess suggests. Your primary goal above still drives each day’s prescribed session.
       </p>
-      {!auth.token ? (
-        <p className="text-[11px] font-medium leading-[1.4] text-faint">Sign in to train for more than one goal.</p>
-      ) : (
+      {view.note && (
+        <p
+          className={cn(
+            "text-[11px] font-medium leading-[1.4]",
+            view.noteTone === "hot" ? "text-hot" : "text-faint",
+            view.showGrid && "mb-2",
+          )}
+          {...(objectivesRes.status === "error" ? { role: "alert" } : {})}
+        >
+          {view.note}
+        </p>
+      )}
+      {view.showGrid && (
         <>
           <div className="grid grid-cols-2 gap-2 sm:grid-cols-3">
             {DOMAIN_OPTIONS.map((d) => {
@@ -104,7 +120,7 @@ function GoalChips() {
                   key={d.value}
                   type="button"
                   aria-pressed={on}
-                  disabled={busy === d.value}
+                  disabled={busy === d.value || !view.interactive}
                   onClick={() => void toggle(d.value, d.label)}
                   className={cn(
                     "cursor-pointer rounded-[10px] border px-3 py-[10px] text-[12.5px] font-semibold leading-none disabled:opacity-50",

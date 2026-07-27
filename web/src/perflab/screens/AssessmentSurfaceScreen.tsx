@@ -14,7 +14,7 @@ import {
 import { useAuth } from "@/auth/useAuth";
 import type { AssessmentBenchmarkCard, ApiError } from "@/types";
 import { Card, Pill, ScreenHeader, SectionLabel } from "../ui";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 
 type Mode = "onramp" | "retest";
 

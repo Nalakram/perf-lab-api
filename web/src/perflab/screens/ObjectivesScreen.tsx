@@ -10,6 +10,7 @@ import { useAuth } from "@/auth/useAuth";
 import type { ApiError, MacrocycleRead, ObjectiveRead } from "@/types";
 import { usePerfLab } from "../store";
 import { useAuthedResource } from "../useAuthedResource";
+import { ResourceState } from "../ResourceState";
 import { sortObjectives } from "../objectives";
 import { domainLabel } from "../domains";
 import { Card, Pill, ScreenHeader, Track } from "../ui";
@@ -30,7 +31,7 @@ export function ObjectivesScreen() {
   const [mutatingId, setMutatingId] = useState<number | null>(null);
   const [mutateError, setMutateError] = useState<string | null>(null);
 
-  const { data: objectives, loading, error } = useAuthedResource<ObjectiveRead[]>(
+  const objectivesRes = useAuthedResource<ObjectiveRead[]>(
     (t) => api.listObjectives(t),
     [state.objectivesRefreshKey],
   );
@@ -63,68 +64,64 @@ export function ObjectivesScreen() {
     }
   }
 
-  // Signed-out: gate rather than show empty/mock content — objectives have no
-  // frontend-only fallback anymore.
-  if (!auth.token) {
-    return (
-      <Notice
-        title="Sign in to set your objectives"
-        body="Objectives — a race, a meet, a Hyrox, a benchmark PR — live on your account so your plan can point at them."
-        action={{ label: "Sign in →", onClick: actions.openAuth }}
-      />
-    );
-  }
-
-  if (error) {
-    return <Notice title="Couldn't load your objectives" body={error} action={{ label: "Retry", onClick: actions.refreshObjectives }} />;
-  }
-
-  // `useAuthedResource` first-renders with loading:false before its effect runs,
-  // so treat "not yet resolved" (null data, no error) as loading too — otherwise
-  // the empty-state CTA flashes for one frame (mirrors PlanningScreen).
-  if (loading || objectives === null) {
-    return <Notice title="Loading your objectives…" body="Fetching what your plan is pointed at." />;
-  }
-
-  if (objectives.length === 0) {
-    return (
-      <Notice
-        title="Set your first objective"
-        body="A race, a meet, a Hyrox, a lift PR — give your plan something to point at, benchmark-linked or free-text."
-        action={{ label: "New objective →", onClick: actions.openObjectiveCreate, primary: true }}
-      />
-    );
-  }
-
-  const sorted = sortObjectives(objectives);
-
+  // Every non-success branch — guest gate, first load, load failure, empty —
+  // belongs to ResourceState, in that fixed order. The screen no longer decides
+  // which one applies, so a failed fetch can't read as "no objectives yet" and
+  // the guest gate can't be forgotten. The old `loading || objectives === null`
+  // guard is gone with it: the hook now reports `loading` on the first render,
+  // so the one-frame empty-CTA flash it worked around cannot occur.
   return (
-    <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
-      <ScreenHeader title="Objectives" subtitle="A race, a meet, a Hyrox, a PR — the targets your training is pointed at.">
-        <button onClick={actions.openObjectiveCreate} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-4 py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10]">New objective →</button>
-      </ScreenHeader>
+    <ResourceState
+      resource={objectivesRes}
+      isEmpty={(rows) => rows.length === 0}
+      variant="screen"
+      icon={<TargetIcon />}
+      guest={{
+        title: "Sign in to set your objectives",
+        body: "Objectives — a race, a meet, a Hyrox, a benchmark PR — live on your account so your plan can point at them.",
+        action: { label: "Sign in →", onClick: actions.openAuth },
+      }}
+      loadingContent={{ title: "Loading your objectives…", body: "Fetching what your plan is pointed at." }}
+      error={{
+        title: "Couldn't load your objectives",
+        action: { label: "Retry", onClick: actions.refreshObjectives },
+      }}
+      empty={{
+        title: "Set your first objective",
+        body: "A race, a meet, a Hyrox, a lift PR — give your plan something to point at, benchmark-linked or free-text.",
+        action: { label: "New objective →", onClick: actions.openObjectiveCreate, primary: true },
+      }}
+      staleLabel="Couldn't refresh your objectives — showing your last loaded list."
+    >
+      {(objectives) => (
+        <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
+          <ScreenHeader title="Objectives" subtitle="A race, a meet, a Hyrox, a PR — the targets your training is pointed at.">
+            <button onClick={actions.openObjectiveCreate} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-4 py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10]">New objective →</button>
+          </ScreenHeader>
 
-      <div className="flex items-start gap-[10px] rounded-[12px] border border-ac/[0.18] bg-ac/[0.05] px-4 py-3">
-        <span className="mt-[1px] text-[13px] text-ac">◆</span>
-        <p className="m-0 text-[12px] font-medium leading-[1.5] text-mute">
-          Objectives aren’t just a wishlist — they <span className="text-soft">drive what your plan emphasizes</span>
-          {" "}(more work toward your highest-priority goal), <span className="text-soft">taper you before a target date</span>,
-          and <span className="text-soft">decide which benchmarks the Assess tab suggests</span>. Set a priority and, for measurable goals, link a benchmark so progress tracks automatically.
-        </p>
-      </div>
+          <div className="flex items-start gap-[10px] rounded-[12px] border border-ac/[0.18] bg-ac/[0.05] px-4 py-3">
+            <span className="mt-[1px] text-[13px] text-ac">◆</span>
+            <p className="m-0 text-[12px] font-medium leading-[1.5] text-mute">
+              Objectives aren’t just a wishlist — they <span className="text-soft">drive what your plan emphasizes</span>
+              {" "}(more work toward your highest-priority goal), <span className="text-soft">taper you before a target date</span>,
+              and <span className="text-soft">decide which benchmarks the Assess tab suggests</span>. Set a priority and, for measurable goals, link a benchmark so progress tracks automatically.
+            </p>
+          </div>
 
-      {mutateError && (
-        <div className="rounded-[11px] border border-hot/25 bg-hot/[0.08] px-[14px] py-[11px] text-[12px] font-medium leading-[1.5] text-hot">{mutateError}</div>
+          {mutateError && (
+            <div className="rounded-[11px] border border-hot/25 bg-hot/[0.08] px-[14px] py-[11px] text-[12px] font-medium leading-[1.5] text-hot">{mutateError}</div>
+          )}
+
+          <ProgramSection />
+
+          <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
+            {sortObjectives(objectives).map((o) => (
+              <ObjectiveCard key={o.id} o={o} busy={mutatingId === o.id} onAchieve={() => markAchieved(o.id)} onDelete={() => remove(o.id)} />
+            ))}
+          </div>
+        </section>
       )}
-
-      <ProgramSection />
-
-      <div className="grid grid-cols-1 gap-4 lg:grid-cols-2">
-        {sorted.map((o) => (
-          <ObjectiveCard key={o.id} o={o} busy={mutatingId === o.id} onAchieve={() => markAchieved(o.id)} onDelete={() => remove(o.id)} />
-        ))}
-      </div>
-    </section>
+    </ResourceState>
   );
 }
 
@@ -136,11 +133,10 @@ export function ObjectivesScreen() {
 // visual noise before there's a program.
 function ProgramSection() {
   const { state, actions } = usePerfLab();
-  const { data, loading, error } = useAuthedResource<MacrocycleRead[]>(
+  const macrosRes = useAuthedResource<MacrocycleRead[]>(
     (t) => api.listMacrocycles(t),
     [state.macrocyclesRefreshKey],
   );
-  const macros = data ?? [];
 
   return (
     <Card className="flex flex-col gap-[14px] p-5">
@@ -157,21 +153,31 @@ function ProgramSection() {
         </button>
       </div>
 
-      {error ? (
-        <div className="text-[12px] font-medium leading-[1.5] text-hot">{error}</div>
-      ) : loading && data === null ? (
-        <div className="text-[12px] font-medium leading-none text-mute">Loading your program…</div>
-      ) : macros.length === 0 ? (
-        <div className="text-[12.5px] font-medium leading-[1.5] text-mute">
-          No program yet. Anchor one to an objective to track a real week X of Y across every block.
-        </div>
-      ) : (
-        <div className="flex flex-col gap-[10px]">
-          {macros.map((m) => (
-            <MacrocycleRow key={m.id} m={m} />
-          ))}
-        </div>
-      )}
+      {/*
+        The card shell always renders; only its body is state-dependent, so this
+        is the `note` weight. Stale-while-refresh is preserved by the contract
+        rather than by a hand-rolled `loading && data === null` conjunct: a
+        refresh keeps the previous rows on screen, and a FAILED refresh keeps
+        them too while saying so — where the old code silently dropped the list.
+      */}
+      <ResourceState
+        resource={macrosRes}
+        isEmpty={(rows) => rows.length === 0}
+        variant="note"
+        guest={{ body: "Sign in to track a program across your blocks." }}
+        loadingContent={{ body: "Loading your program…" }}
+        empty={{ body: "No program yet. Anchor one to an objective to track a real week X of Y across every block." }}
+        error={{ title: "Couldn't load your program" }}
+        staleLabel="Couldn't refresh your program — showing your last loaded weeks."
+      >
+        {(macros) => (
+          <div className="flex flex-col gap-[10px]">
+            {macros.map((m) => (
+              <MacrocycleRow key={m.id} m={m} />
+            ))}
+          </div>
+        )}
+      </ResourceState>
     </Card>
   );
 }
@@ -297,43 +303,16 @@ function ObjectiveCard({
   );
 }
 
-// Shared loading / error / gate / empty notice — kept visually distinct so a
-// fetch that's still in-flight or that errored is never mistaken for "no
-// objectives yet" (mirrors PlanningScreen's PlanningNotice).
-function Notice({
-  title,
-  body,
-  action,
-}: {
-  title: string;
-  body: string;
-  action?: { label: string; onClick: () => void; primary?: boolean };
-}) {
+// The local Notice component is gone: ResourceState now owns every notice
+// branch, so the four states can no longer drift apart per screen.
+function TargetIcon() {
   return (
-    <section className="flex min-h-[70vh] items-center justify-center px-[30px] pb-9 pt-[26px]">
-      <Card className="flex max-w-[520px] flex-col items-center gap-4 p-[44px] text-center">
-        <div className="grid h-[60px] w-[60px] place-items-center rounded-[16px] border border-ac/25 bg-ac/[0.1]">
-          <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="1.6">
-            <circle cx="12" cy="12" r="9" />
-            <circle cx="12" cy="12" r="5" />
-            <circle cx="12" cy="12" r="1.2" fill="var(--ac)" stroke="none" />
-          </svg>
-        </div>
-        <div className="text-[22px] font-bold leading-[1.2] text-ink">{title}</div>
-        <div className="max-w-[380px] text-[13.5px] font-medium leading-[1.6] text-mute">{body}</div>
-        {action && (
-          <button
-            onClick={action.onClick}
-            className={
-              action.primary
-                ? "mt-[6px] rounded-[10px] bg-gradient-to-r from-ac to-[#a7e36e] px-5 py-3 text-[13px] font-semibold leading-none text-[#0a0c10]"
-                : "mt-[6px] rounded-[10px] border border-white/10 bg-white/[0.04] px-5 py-3 text-[13px] font-semibold leading-none text-soft"
-            }
-          >
-            {action.label}
-          </button>
-        )}
-      </Card>
-    </section>
+    <div className="grid h-[60px] w-[60px] place-items-center rounded-[16px] border border-ac/25 bg-ac/[0.1]">
+      <svg width="28" height="28" viewBox="0 0 24 24" fill="none" stroke="var(--ac)" strokeWidth="1.6">
+        <circle cx="12" cy="12" r="9" />
+        <circle cx="12" cy="12" r="5" />
+        <circle cx="12" cy="12" r="1.2" fill="var(--ac)" stroke="none" />
+      </svg>
+    </div>
   );
 }

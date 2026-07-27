@@ -4,7 +4,7 @@ import { usePerfLab, DEFAULT_GOAL } from "../store";
 import { Card, ReadinessRing, SectionLabel, SyncChip, Track } from "../ui";
 import { Sparkline, Gauge } from "../viz";
 import { buildCheckin, COLORS, DAYS, readinessColor, readinessNote, readinessWord } from "../sim";
-import { useAuthedResource } from "../useAuthedResource";
+import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { useAuth } from "@/auth/useAuth";
 import {
   getDashboardOverview,
@@ -18,6 +18,7 @@ import {
 } from "@/api/perfLabClient";
 import { sortObjectives } from "../objectives";
 import { activeMacrocycle, weekProgressLabel } from "../macrocycles";
+import { fatigueDisplayProxy, meanFatigue, peakTissue, relativeTime, snapshotCapacity } from "../stateVector";
 import type {
   MacrocycleRead,
   ObjectiveRead,
@@ -66,40 +67,8 @@ function dateLine(): string {
 }
 
 /** Compact "Xh ago" from an ISO timestamp, for the sync chip. */
-function relativeTime(iso: string): string {
-  const secs = Math.max(0, (Date.now() - new Date(iso).getTime()) / 1000);
-  if (secs < 60) return "just now";
-  const m = Math.floor(secs / 60);
-  if (m < 60) return `${m}m ago`;
-  const h = Math.floor(m / 60);
-  if (h < 24) return `${h}h ago`;
-  return `${Math.floor(h / 24)}d ago`;
-}
-
-/** Mean of the six fatigue axes (0–100), from the decomposed vector when present,
- *  else the legacy fatigue scalars. */
-function meanFatigue(sv: UnifiedStateVector): number {
-  const f = sv.fatigue_f;
-  const vals = f
-    ? [f.cns, f.muscular, f.metabolic, f.structural, f.tendon, f.grip]
-    : [sv.f_nm_central, sv.f_nm_peripheral, sv.f_met_systemic, sv.f_struct_damage];
-  return vals.reduce((a, b) => a + b, 0) / vals.length;
-}
-
-/** Per-day readiness proxy ~ (1 − mean fatigue), scaled 0–100 — mirrors the
- *  backend `overall_readiness` intent for the trend line. */
-function stateReadinessProxy(sv: UnifiedStateVector): number {
-  return Math.round(Math.max(0, Math.min(100, 100 - meanFatigue(sv))));
-}
-
-/** Highest-loaded tissue region + its value, from the latest state vector. */
-function peakTissue(sv: UnifiedStateVector): { region: string; value: number } | null {
-  const t = sv.tissue_t;
-  if (!t) return null;
-  const entries = Object.entries(t) as [string, number][];
-  const [region, value] = entries.sort((a, b) => b[1] - a[1])[0];
-  return { region: region.charAt(0).toUpperCase() + region.slice(1), value: Math.round(value) };
-}
+// State-vector reductions + typed capacity access now live in the shared
+// ../stateVector module (imported above) — previously copied module-local here.
 
 const SORE_WORDS = ["None", "Mild", "Moderate", "High"];
 /** Map the backend 0–10 soreness scalar (higher = worse) to a word. */
@@ -356,7 +325,7 @@ export function OverviewScreen() {
   const ovWord = readinessWord(ovVal);
 
   // ---- 14-day readiness trend (real proxy series; sim series for guests) ----
-  const realSeries = token && historyRes.data && historyRes.data.length ? historyRes.data.map(stateReadinessProxy) : null;
+  const realSeries = token && historyRes.data && historyRes.data.length ? historyRes.data.map(fatigueDisplayProxy) : null;
   const series = realSeries ?? DAYS.slice(Math.max(0, DAYS.length - 14)).map((d) => d.readiness);
   const sN = series.length;
   const showSpark = sN >= 2;
@@ -383,8 +352,11 @@ export function OverviewScreen() {
 
   // ---- Twin snapshot: latest real state vector (sim for guests) ----
   const latest = token ? historyRes.data?.[historyRes.data.length - 1] ?? null : null;
-  const snapAerobic = latest ? Math.round(latest.capacity_x?.aerobic ?? latest.c_met_aerobic) : todayD.C.aerobic;
-  const snapStrength = latest ? Math.round(latest.capacity_x?.max_strength ?? latest.c_nm_force) : todayD.C.strength;
+  // Typed, runtime-honest capacity reads (decomposed axis → legacy mirror → null);
+  // a null read renders "—", never a fabricated 0.
+  const roundOrDash = (v: number | null): ReactNode => (v == null ? "—" : Math.round(v));
+  const snapAerobic: ReactNode = latest ? roundOrDash(snapshotCapacity(latest, "aerobic")) : Math.round(todayD.C.aerobic);
+  const snapStrength: ReactNode = latest ? roundOrDash(snapshotCapacity(latest, "max_strength")) : Math.round(todayD.C.strength);
   const snapMeanFat = latest ? Math.round(meanFatigue(latest)) : Math.round(Object.values(todayD.F).reduce((a, b) => a + b, 0) / 6);
   const simTissue = Object.entries(todayD.T).sort((a, b) => b[1] - a[1])[0];
   const snapTissue = latest ? peakTissue(latest) : { region: simTissue[0], value: simTissue[1] };

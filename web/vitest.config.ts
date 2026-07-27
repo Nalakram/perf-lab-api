@@ -1,11 +1,18 @@
+import path from "node:path";
 import { defineConfig } from "vitest/config";
 
-// Unit tests run in a plain Node environment — the covered logic (unit conversion,
-// pure helpers) touches no DOM. Add a jsdom/happy-dom environment later if/when
-// component tests are introduced.
+// Node stays the DEFAULT environment: the pure suites (unit conversion, state
+// reductions, resource transitions) touch no DOM and must not pay for browser
+// emulation. The few React hook/component tests opt in per file with a
+// `// @vitest-environment jsdom` docblock — see useAuthedResource.test.tsx.
 export default defineConfig({
   test: {
     environment: "node",
-    include: ["src/**/*.test.ts"],
+    include: ["src/**/*.test.ts", "src/**/*.test.tsx"],
+  },
+  resolve: {
+    alias: {
+      "@": path.resolve(__dirname, "./src"),
+    },
   },
 });
