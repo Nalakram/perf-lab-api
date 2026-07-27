@@ -119,24 +119,46 @@ describe("readinessSection", () => {
     expect(isValue(view.confidenceBand)).toBe(false);
   });
 
-  it("NONINTERFERENCE: no local check-in value can change the outcome (#189c)", () => {
-    // The selector takes only the resource — there is no parameter through which a
-    // client-side signal could arrive. This pins that property: three wildly
-    // different check-in drafts, and the readiness output is byte-identical.
+  it("NONINTERFERENCE: no signal other than the backend score can produce one (#189c)", () => {
+    // Three check-in drafts that provably yield three DIFFERENT client-side
+    // readiness numbers. They exist to establish that a local computation over
+    // wellness is discriminating — i.e. that if one were reachable, it would show.
     const drafts = [
       { hrv: 20, sleepH: 2, sleepQ: 1, rhr: 95, soreness: "high" as const, mood: 1, stress: 5, done: true },
       { hrv: 64, sleepH: 7.5, sleepQ: 4, rhr: 52, soreness: "mild" as const, mood: 4, stress: 2, done: true },
       { hrv: 200, sleepH: 14, sleepQ: 5, rhr: 30, soreness: "none" as const, mood: 5, stress: 1, done: true },
     ];
-    // Sanity: these drafts really do produce different client-side readiness, so the
-    // invariance below is a property of the selector, not of the inputs.
     const derived = drafts.map((d) => buildCheckin(d).readiness);
     expect(new Set(derived).size).toBe(drafts.length);
 
-    const onError = drafts.map(() => JSON.stringify(readinessSection(failed<ReadinessScore>())));
-    const onEmpty = drafts.map(() => JSON.stringify(readinessSection(ok(readinessScore({ score: null })))));
-    expect(new Set(onError).size).toBe(1);
-    expect(new Set(onEmpty).size).toBe(1);
+    // The property under test is that NOTHING on the payload except `score` can
+    // yield a readiness value. So vary every other field the payload carries —
+    // including wellness components with large contributions, which is the most
+    // plausible thing a future fallback would reach for — and require the output
+    // to be identical while `score` stays null.
+    const decoys: Partial<ReadinessScore>[] = drafts.map((d, i) => ({
+      score: null,
+      wellness_delta: derived[i],
+      note: `derived ${derived[i]}`,
+      components: [
+        { signal: "hrv", value: d.hrv, baseline: 62, contribution: (d.hrv - 62) / 100 },
+        { signal: "sleep_hours", value: d.sleepH, baseline: 7, contribution: (d.sleepH - 7) / 10 },
+      ],
+    })) as Partial<ReadinessScore>[];
+
+    const outputs = decoys.map((over) => JSON.stringify(readinessSection(ok(readinessScore(over)))));
+    expect(new Set(outputs).size).toBe(1);
+    // And the single shared output carries no number at all.
+    expect(outputs[0]).not.toMatch(/\d/);
+
+    // The failure arm is likewise invariant and numberless.
+    expect(JSON.stringify(readinessSection(failed<ReadinessScore>()))).not.toMatch(/\d/);
+
+    // NOTE ON WHAT THIS CANNOT COVER: a fallback reaching a check-in value through
+    // a MODULE-LEVEL import rather than through the payload would survive this
+    // test. That route is closed by overviewBoundary.test.ts, which walks
+    // overviewModel.ts's transitive value-imports and fails if sim.ts or a fixture
+    // store is reachable. The two tests are complementary by design.
   });
 
   it("carries no trend or delta field (#186 — the trend is not readiness)", () => {
