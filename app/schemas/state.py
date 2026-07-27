@@ -9,7 +9,11 @@ from app.domain.vectors import (
     FatigueState,
     TissueState,
 )
-from app.logic.confidence_presentation import POLICY_VERSION, confidence_status
+from app.logic.confidence_presentation import (
+    POLICY_VERSION,
+    ConfidenceStatus,
+    confidence_status,
+)
 
 
 class UnifiedStateVector(BaseModel):
@@ -73,7 +77,7 @@ class StateHistorySnapshotRead(UnifiedStateVector):
             "accrue, so index N is not a durable reference to a snapshot."
         ),
     )
-    capacity_confidence_status: dict[str, str] = Field(
+    capacity_confidence_status: dict[str, ConfidenceStatus] = Field(
         ...,
         description=(
             "Per-capacity-axis certainty band (established | provisional | "
@@ -92,7 +96,7 @@ class StateHistorySnapshotRead(UnifiedStateVector):
     ) -> "StateHistorySnapshotRead":
         """Project a domain state vector + its persisted row id into the read model,
         deriving per-axis confidence status from that vector's own variance (all 8 axes)."""
-        statuses = {
+        statuses: dict[str, ConfidenceStatus] = {
             axis: confidence_status(getattr(state.capacity_confidence, axis))
             for axis in CapacityConfidence.KEYS
         }

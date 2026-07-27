@@ -29,6 +29,10 @@ export type UnifiedStateVector = Schemas["UnifiedStateVector"];
  *  for the Twin's time-travel view (GET /v1/state-history; ADR-0059). A structural
  *  superset of UnifiedStateVector. */
 export type StateHistorySnapshotRead = Schemas["StateHistorySnapshotRead"];
+/** The canonical certainty band (ADR-0059), generated from the backend Literal in
+ *  `app/logic/confidence_presentation.py`. Consume this rather than re-declaring
+ *  the three values — a rename on the backend then becomes a tsc error here. */
+export type ConfidenceStatus = NonNullable<Schemas["AssessmentBenchmarkCard"]["confidence_status"]>;
 
 /* ---------- Workouts / dose ---------- */
 export type Modality = Schemas["WorkoutLog"]["modality"];

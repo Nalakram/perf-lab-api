@@ -25,7 +25,7 @@
 
 import { Radar, type RadarAxis } from "../../viz";
 import { SectionLabel } from "../../ui";
-import type { CapacityState, StateHistorySnapshotRead } from "@/types";
+import type { CapacityState, ConfidenceStatus, StateHistorySnapshotRead } from "@/types";
 
 // ---- Five plotted axes: X_t field mapping + canonical ceilings ----
 // Ceilings are frontend presentation constants, deliberately independent of the
@@ -59,9 +59,14 @@ const TYPE_NAMES: Record<string, string> = {
 
 // The presentation policy owns the variance thresholds — we only narrow the
 // string the backend already resolved. Any unknown → the safe "insufficient".
-type ConfStatus = "established" | "provisional" | "insufficient";
-function narrowStatus(s: string | undefined): ConfStatus {
-  return s === "established" || s === "provisional" ? s : "insufficient";
+// The band itself is generated from the backend Literal (types.ts ->
+// types.gen.ts -> openapi.json -> confidence_presentation.ConfidenceStatus), so
+// renaming a value on the backend breaks compilation here instead of silently
+// falling through to "insufficient". Narrowing survives because the map is keyed
+// by axis and an axis may simply be absent.
+type ConfStatus = ConfidenceStatus;
+function narrowStatus(s: ConfidenceStatus | undefined): ConfStatus {
+  return s ?? "insufficient";
 }
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n));

@@ -91,7 +91,7 @@ def benchmark_utility(
 
 def _confidence_status(
     measures_axes: list[str], variance_by_axis: dict[str, float] | None
-) -> str | None:
+) -> cp.ConfidenceStatus | None:
     """Worst-axis certainty band (highest variance) over the measured axes."""
     if not measures_axes or not variance_by_axis:
         return None

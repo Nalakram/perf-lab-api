@@ -963,7 +963,7 @@ export interface components {
             /** Code */
             code: string;
             /** Confidence Status */
-            confidence_status: string | null;
+            confidence_status: ("established" | "provisional" | "insufficient") | null;
             /** Domain */
             domain: string;
             /** Domain Lenses */
@@ -2575,7 +2575,7 @@ export interface components {
              * @description Per-capacity-axis certainty band (established | provisional | insufficient), derived from this snapshot's own capacity_confidence variance. All 8 capacity axes, even those the Twin does not plot.
              */
             capacity_confidence_status: {
-                [key: string]: string;
+                [key: string]: "established" | "provisional" | "insufficient";
             };
             capacity_x?: components["schemas"]["CapacityState"];
             /**
