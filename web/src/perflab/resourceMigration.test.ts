@@ -15,15 +15,16 @@ import { describe, expect, it } from "vitest";
 const SRC = join(__dirname, "..");
 const HOOK_FILE = join(__dirname, "useAuthedResource.ts");
 
-/** The exact set of files still on the legacy adapter. Shrinks, never grows. */
-const UNMIGRATED = [
-  "perflab/overlays/MacrocycleCreateModal.tsx",
-  "perflab/screens/AssessmentSurfaceScreen.tsx",
-  "perflab/screens/HistoryScreen.tsx",
-  "perflab/screens/PlanningScreen.tsx",
-  "perflab/screens/SimulatorScreen.tsx",
-  "perflab/screens/TwinScreen.tsx",
-];
+/**
+ * The exact set of files still on the legacy adapter. Shrinks, never grows.
+ *
+ * IT IS NOW EMPTY, and that is the terminal state: the sweep is complete and the
+ * adapter has been deleted from useAuthedResource.ts. The second test below
+ * enforces that deletion, so this list can never be repopulated to bring the
+ * adapter back — a new legacy consumer fails the first test, and restoring the
+ * adapter to satisfy it fails the second.
+ */
+const UNMIGRATED: string[] = [];
 
 function sourceFiles(dir: string): string[] {
   return readdirSync(dir, { withFileTypes: true }).flatMap((entry) => {

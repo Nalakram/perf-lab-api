@@ -12,7 +12,8 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { PlannedSessionRead, ReadinessScore, WorkoutPrescription } from "@/types";
 import { usePerfLab } from "../store";
-import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
+import { useAuthedResource } from "../useAuthedResource";
+import { assertNever, type AuthedResource } from "../resource";
 import { Card, MetricBar, ScreenHeader, SectionLabel } from "../ui";
 import { Chart, Bars, Line, Marker, Axis, Legend, useVizTheme } from "../viz";
 import { PHASES, PLAN_DAYS, PLAN_LOAD, PLAN_READY } from "../sim";
@@ -103,55 +104,70 @@ function AuthedPlanningBody() {
   );
   // `planningRefreshKey` is bumped by BlockCreateModal after a successful
   // POST /v1/planning/blocks so a freshly created block's week shows up here.
-  const { data: sessions, loading, error } = useAuthedResource<PlannedSessionRead[]>(
+  const sessions = useAuthedResource<PlannedSessionRead[]>(
     (t) => api.listPlannedSessions(t, { start_date: week.start_date, end_date: week.end_date }),
     [week.start_date, state.planningRefreshKey],
   );
 
   // Week-strip load / error / genuinely-no-block distinction (kept from before):
-  // a fetch that's in-flight or errored must not be mistaken for "no block".
-  if (error) return <PlanningNotice title="Couldn't load your plan" body={error} onRetry={() => actions.focusPlanningWeek(week.start_date)} />;
-  // `useAuthedResource` first-renders with loading:false before its effect runs,
-  // so treat "not yet resolved" (null data, no error) as loading too.
-  if (loading || sessions === null) return <PlanningNotice title="Loading your plan…" body="Fetching this week's prescribed sessions." />;
-  if (sessions.length === 0) return <PlanningEmptyState onCreate={actions.openBlockCreate} />;
+  // a fetch that's in-flight or errored must not be mistaken for "no block". The
+  // contract now enforces that ordering rather than this screen re-deriving it —
+  // "no block" is read only off a payload that actually loaded.
+  switch (sessions.status) {
+    // `guest` cannot be observed here: PlanningScreen mounts this body only with
+    // a token, and the hook resolves identity from the same auth context in the
+    // same commit. It reads as "not resolved yet", which is what it was before.
+    case "guest":
+    case "loading":
+      return <PlanningNotice title="Loading your plan…" body="Fetching this week's prescribed sessions." />;
 
-  const weekCells = buildWeekCells(week.monday, sessions) ?? [];
+    case "error":
+      return <PlanningNotice title="Couldn't load your plan" body={sessions.error.message} onRetry={() => actions.focusPlanningWeek(week.start_date)} />;
 
-  return (
-    <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
-      <ScreenHeader title="Planning" subtitle="Adaptive prescription — each session is dosed against your current readiness and tissue load.">
-        <ReadinessPill />
-        <button onClick={actions.openBlockCreate} className="rounded-[9px] border border-white/10 bg-white/[0.04] px-4 py-[11px] text-[12.5px] font-semibold leading-none text-soft">New block</button>
-      </ScreenHeader>
+    case "success": {
+      if (sessions.data.length === 0) return <PlanningEmptyState onCreate={actions.openBlockCreate} />;
 
-      {/* week strip — live planned sessions */}
-      <Card className="px-[18px] pb-4 pt-[18px]">
-        <div className="mb-[14px] flex items-center justify-between">
-          <SectionLabel>This week</SectionLabel>
-        </div>
-        <div className="grid grid-cols-7 gap-2">
-          {weekCells.map((w) => (
-            <div
-              key={w.day}
-              {...(w.today ? {} : { "data-tile": "1" })}
-              className={`flex min-h-[104px] flex-col rounded-[12px] border p-[10px] pt-3 ${w.today ? "border-ac/[0.45] bg-ac/[0.07] shadow-[inset_0_0_0_1px_rgba(198,241,53,.15)]" : "border-white/[0.06]"}`}
-            >
-              <div className="flex items-center justify-between">
-                <span className={`font-mono text-[10px] uppercase leading-none ${w.today ? "text-ac" : "text-faint"}`}>{w.day}</span>
-                {w.today && <span className="rounded-[5px] bg-ac px-[5px] py-[3px] font-mono text-[8px] leading-none text-[#0a0c10]">TODAY</span>}
-              </div>
-              <div className={`mt-auto text-[12px] leading-[1.3] ${w.today ? "font-bold text-ink" : w.rest ? "font-semibold text-faint" : "font-semibold text-mute"}`}>{w.title}</div>
-              {w.sub && <div className={`mt-1 text-[10px] font-medium leading-none ${w.subColor}`}>{w.sub}</div>}
+      const weekCells = buildWeekCells(week.monday, sessions.data) ?? [];
+
+      return (
+        <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
+          <ScreenHeader title="Planning" subtitle="Adaptive prescription — each session is dosed against your current readiness and tissue load.">
+            <ReadinessPill />
+            <button onClick={actions.openBlockCreate} className="rounded-[9px] border border-white/10 bg-white/[0.04] px-4 py-[11px] text-[12.5px] font-semibold leading-none text-soft">New block</button>
+          </ScreenHeader>
+
+          {/* week strip — live planned sessions */}
+          <Card className="px-[18px] pb-4 pt-[18px]">
+            <div className="mb-[14px] flex items-center justify-between">
+              <SectionLabel>This week</SectionLabel>
             </div>
-          ))}
-        </div>
-      </Card>
+            <div className="grid grid-cols-7 gap-2">
+              {weekCells.map((w) => (
+                <div
+                  key={w.day}
+                  {...(w.today ? {} : { "data-tile": "1" })}
+                  className={`flex min-h-[104px] flex-col rounded-[12px] border p-[10px] pt-3 ${w.today ? "border-ac/[0.45] bg-ac/[0.07] shadow-[inset_0_0_0_1px_rgba(198,241,53,.15)]" : "border-white/[0.06]"}`}
+                >
+                  <div className="flex items-center justify-between">
+                    <span className={`font-mono text-[10px] uppercase leading-none ${w.today ? "text-ac" : "text-faint"}`}>{w.day}</span>
+                    {w.today && <span className="rounded-[5px] bg-ac px-[5px] py-[3px] font-mono text-[8px] leading-none text-[#0a0c10]">TODAY</span>}
+                  </div>
+                  <div className={`mt-auto text-[12px] leading-[1.3] ${w.today ? "font-bold text-ink" : w.rest ? "font-semibold text-faint" : "font-semibold text-mute"}`}>{w.title}</div>
+                  {w.sub && <div className={`mt-1 text-[10px] font-medium leading-none ${w.subColor}`}>{w.sub}</div>}
+                </div>
+              ))}
+            </div>
+          </Card>
 
-      {/* live prescribed session + its rationale/explanation */}
-      <PrescribedSessionCard goal={goal} />
-    </section>
-  );
+          {/* live prescribed session + its rationale/explanation */}
+          <PrescribedSessionCard goal={goal} />
+        </section>
+      );
+    }
+
+    default:
+      return assertNever(sessions);
+  }
 }
 
 // The one backend-owned readiness number (getReadiness → ReadinessScore.score,
@@ -159,14 +175,8 @@ function AuthedPlanningBody() {
 // "Readiness unavailable" without touching the week strip or session card.
 function ReadinessPill() {
   const { state } = usePerfLab();
-  const { data, loading } = useAuthedResource<ReadinessScore>((t) => api.getReadiness(t), [state.readinessRefreshKey]);
-  const score = data?.score;
-  const label = loading
-    ? "Readiness…"
-    : score == null
-      ? "Readiness unavailable"
-      : `Readiness ${Math.round(score)}${data?.band ? ` · ${titleCase(data.band)}` : ""}`;
-  const known = !loading && score != null;
+  const readiness = useAuthedResource<ReadinessScore>((t) => api.getReadiness(t), [state.readinessRefreshKey]);
+  const { label, known } = readinessPillView(readiness);
   return (
     <div className="flex items-center gap-[7px] rounded-[9px] border border-ac/25 bg-ac/[0.1] px-[13px] py-[9px] font-mono text-[11px] font-semibold leading-none text-ac">
       {known && <span className="h-[7px] w-[7px] rounded-full bg-ac" />}
@@ -175,33 +185,89 @@ function ReadinessPill() {
   );
 }
 
+// The pill is one inline chip, not a card, so it consumes the contract through
+// an exhaustive switch. `known` (the lit dot) stays tied to an actual number
+// being on screen: no dot for guest, in-flight, failed, or a payload whose
+// `score` is null.
+function readinessPillView(resource: AuthedResource<ReadinessScore>): { label: string; known: boolean } {
+  switch (resource.status) {
+    case "loading":
+      return { label: "Readiness…", known: false };
+
+    // Unreachable (authenticated surface), and indistinguishable to the athlete
+    // from a failed read: either way there is no readiness to state.
+    case "guest":
+    case "error":
+      return { label: "Readiness unavailable", known: false };
+
+    case "success": {
+      const { score, band } = resource.data;
+      if (score == null) return { label: "Readiness unavailable", known: false };
+      return { label: `Readiness ${Math.round(score)}${band ? ` · ${titleCase(band)}` : ""}`, known: true };
+    }
+
+    default:
+      return assertNever(resource);
+  }
+}
+
 // The prescribed session, from the same live seam TwinScreen uses
 // (GET /v1/next-session → typed WorkoutPrescription). A prescription failure is
 // localized to this card and never restores fixtures.
 function PrescribedSessionCard({ goal }: { goal: string }) {
-  const { data: rx, loading, error } = useAuthedResource<WorkoutPrescription>(
-    (t) => api.getNextSession(goal, t),
-    [goal],
-  );
+  const prescription = useAuthedResource<WorkoutPrescription>((t) => api.getNextSession(goal, t), [goal]);
 
+  // The card shell and its header render in every state — only the interior and
+  // the header's right-hand summary are state-dependent — so this surface reads
+  // the contract through exhaustive switches rather than <ResourceState>, which
+  // replaces a whole card/section with a notice.
   return (
     <Card className="p-[22px]">
       <div className="flex items-center justify-between">
         <SectionLabel>Prescribed session</SectionLabel>
-        <div className="font-mono text-[10px] leading-none text-dim">
-          {rx ? `${rx.type} · ${rx.duration_min} min` : loading ? "loading…" : ""}
-        </div>
+        <div className="font-mono text-[10px] leading-none text-dim">{prescriptionSummary(prescription)}</div>
       </div>
 
-      {loading && <div className="mt-4 text-[13px] font-medium text-mute">Computing your prescription…</div>}
+      <PrescribedSessionBody resource={prescription} />
+    </Card>
+  );
+}
 
-      {!loading && error && (
+function prescriptionSummary(resource: AuthedResource<WorkoutPrescription>): string {
+  switch (resource.status) {
+    case "loading":
+      return "loading…";
+    // Nothing to summarize, and nothing to imply: the header stays blank.
+    case "guest":
+    case "error":
+      return "";
+    case "success":
+      return `${resource.data.type} · ${resource.data.duration_min} min`;
+    default:
+      return assertNever(resource);
+  }
+}
+
+function PrescribedSessionBody({ resource }: { resource: AuthedResource<WorkoutPrescription> }) {
+  switch (resource.status) {
+    // Unreachable (the card only mounts inside the authenticated body) and
+    // deliberately silent, as it was before: a guest is told nothing here.
+    case "guest":
+      return null;
+
+    case "loading":
+      return <div className="mt-4 text-[13px] font-medium text-mute">Computing your prescription…</div>;
+
+    case "error":
+      return (
         <div className="mt-4 text-[12.5px] font-medium leading-[1.5] text-mute">
           No live prescription yet — log a workout or run a field test to seed your twin.
         </div>
-      )}
+      );
 
-      {!loading && !error && rx && (
+    case "success": {
+      const rx = resource.data;
+      return (
         <div className="mt-4 flex flex-col gap-4">
           <div>
             <div className="text-[22px] font-bold leading-tight text-ink">{rx.focus}</div>
@@ -231,9 +297,12 @@ function PrescribedSessionCard({ goal }: { goal: string }) {
 
           <WhyThisSession why={rx.why} />
         </div>
-      )}
-    </Card>
-  );
+      );
+    }
+
+    default:
+      return assertNever(resource);
+  }
 }
 
 // Compact explanation, built only from human-readable fields of the live
