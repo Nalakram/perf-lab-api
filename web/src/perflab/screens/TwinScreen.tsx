@@ -30,7 +30,8 @@ import { GuestTwinPreview } from "./twin/GuestTwinPreview";
 import { MiniTile } from "./twin/MiniTile";
 import { TissueBodyMap } from "./twin/TissueBodyMap";
 import { viewingLabel } from "./twin/viewingLabel";
-import { FATIGUE_ORDER, fatigueColor, readinessColor, readinessNote, readinessWord } from "../sim";
+import { FATIGUE_ORDER, fatigueColor } from "../sim";
+import { readinessColor, readinessNote, readinessWord } from "../readinessPresentation";
 
 // meanFatigue + relativeTime come from the shared ../stateVector module, and
 // viewingLabel from ./twin/viewingLabel — no longer copied module-local.

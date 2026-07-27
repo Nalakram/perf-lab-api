@@ -6,7 +6,8 @@ import { useAuth } from "@/auth/useAuth";
 import { getReadiness, ingestWellness, updateProfile } from "@/api/perfLabClient";
 import type { ApiError, ReadinessScore } from "@/types";
 import { usePerfLab } from "../store";
-import { buildCheckin, readinessColor, readinessWord } from "../sim";
+import { buildCheckin } from "../sim";
+import { readinessColor, readinessWord } from "../readinessPresentation";
 import {
   WELLNESS_SIGNALS,
   buildWellnessSample,

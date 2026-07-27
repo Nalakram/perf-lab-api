@@ -163,17 +163,10 @@ export function buildCheckin(c: CheckinState): { readiness: number; drivers: Che
 }
 
 // ---- Color / word helpers ----
-export const readinessColor = (r: number) =>
-  r >= 75 ? COLORS.good : r >= 55 ? COLORS.lime : r >= 40 ? COLORS.warn : COLORS.hot;
-export const readinessWord = (r: number) => (r >= 75 ? "Fresh" : r >= 55 ? "Moderate" : r >= 40 ? "Low" : "Crashed");
-export const readinessNote = (r: number) =>
-  r >= 75
-    ? "Fully recovered — green light for a quality or volume block."
-    : r >= 55
-      ? "Hold intensity; full quality session viable in ~24h."
-      : r >= 40
-        ? "Prioritise easy volume or recovery; defer hard efforts."
-        : "Recovery only — systemic and tissue load elevated.";
+// `readinessColor` / `readinessWord` / `readinessNote` moved to
+// ./readinessPresentation — they carry no fixture data, and leaving them here
+// forced screens that only wanted the palette to import this fixture module.
+// Import them from there; this file must stay categorically fixture-bearing.
 export const fatigueColor = (v: number) => (v >= 45 ? COLORS.hot : v >= 26 ? COLORS.warn : COLORS.good);
 export const swatch = (c: string) =>
   c === COLORS.hot ? "rgba(255,138,92,.3)" : c === COLORS.warn ? "rgba(245,196,81,.26)" : "rgba(95,208,138,.22)";

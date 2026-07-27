@@ -23,11 +23,9 @@ import {
   DAY_COUNT,
   FATIGUE_ORDER,
   fatigueColor,
-  readinessColor,
-  readinessNote,
-  readinessWord,
   SKILL_DEFS,
 } from "../../sim";
+import { readinessColor, readinessNote, readinessWord } from "../../readinessPresentation";
 import { MiniTile } from "./MiniTile";
 import { TissueBodyMap } from "./TissueBodyMap";
 import { dayMonthLabel } from "./viewingLabel";

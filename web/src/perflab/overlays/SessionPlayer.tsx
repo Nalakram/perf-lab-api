@@ -1,14 +1,31 @@
 // src/perflab/overlays/SessionPlayer.tsx
+import { useAuth } from "@/auth/useAuth";
 import { usePerfLab } from "../store";
 import { Gauge, Meter } from "../viz";
-import { COLORS, mmss, PHASES } from "../sim";
+import { mmss, PHASES } from "../sim";
+import { COLORS } from "../readinessPresentation";
 
 const pad = (n: number) => String(((n % 60) + 60) % 60).padStart(2, "0");
 const zoneColor = (z: string) => (z === "Z3" ? COLORS.lime : z === "Z4" ? COLORS.warn : z === "Z5" ? COLORS.hot : COLORS.teal);
 
 export function SessionPlayer() {
   const { state, actions } = usePerfLab();
+  const { token } = useAuth();
   if (!state.sessOpen) return null;
+
+  // THE PLAYER BOUNDARY (map #182, L3 / ticket #188).
+  //
+  // Everything below renders the hardcoded `sim.PHASES` interval plan — fixed
+  // paces, invented heart rate, invented splits. Ticket #183 established that no
+  // real playable session can be constructed today: `WorkoutPrescription` carries
+  // no per-phase duration/zone/pace/rest, and /planning/today rewrites
+  // prescribed_content on every call, so a session has no revision identity either.
+  //
+  // Hiding the entry buttons is necessary but NOT sufficient — `sessOpen` is set by
+  // a zero-payload store action, so retained state, a deep link, or any future
+  // caller could reopen this. The rejection therefore lives here, at the boundary,
+  // where it holds regardless of who calls.
+  if (token != null) return null;
 
   const phases = PHASES;
   const pIdx = state.phaseIdx;

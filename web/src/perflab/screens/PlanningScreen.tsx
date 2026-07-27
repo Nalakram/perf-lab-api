@@ -15,7 +15,8 @@ import { usePerfLab } from "../store";
 import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
 import { Card, MetricBar, ScreenHeader, SectionLabel } from "../ui";
 import { Chart, Bars, Line, Marker, Axis, Legend, useVizTheme } from "../viz";
-import { COLORS, PLAN_DAYS, PLAN_LOAD, PLAN_READY } from "../sim";
+import { PHASES, PLAN_DAYS, PLAN_LOAD, PLAN_READY } from "../sim";
+import { COLORS } from "../readinessPresentation";
 
 interface WeekCell {
   day: string;
@@ -447,7 +448,9 @@ function GuestPlanningPreview() {
             </div>
           </div>
           <div className="mt-[18px] flex gap-[10px]">
-            <button onClick={actions.openSession} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-[18px] py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10]">Start session</button>
+            {/* Guest-only surface (PlanningScreen:87), so the simulated interval
+                plan is a labelled preview rather than a claim about the athlete. */}
+            <button onClick={() => actions.openSession(PHASES.map((p) => p.dur))} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-[18px] py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10]">Start session</button>
           </div>
         </Card>
 

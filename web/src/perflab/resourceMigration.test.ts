@@ -20,7 +20,6 @@ const UNMIGRATED = [
   "perflab/overlays/MacrocycleCreateModal.tsx",
   "perflab/screens/AssessmentSurfaceScreen.tsx",
   "perflab/screens/HistoryScreen.tsx",
-  "perflab/screens/OverviewScreen.tsx",
   "perflab/screens/PlanningScreen.tsx",
   "perflab/screens/SimulatorScreen.tsx",
   "perflab/screens/TwinScreen.tsx",
