@@ -253,7 +253,7 @@ describe("twinSnapshotSection", () => {
     const bare = snapshot();
     const enriched = snapshot({
       snapshot_id: 4242,
-      capacity_confidence_status: { aerobic: "estimated" },
+      capacity_confidence_status: { aerobic: "provisional" },
       confidence_presentation_policy_version: "v1",
     } as Partial<StateHistorySnapshotRead>);
     expect(JSON.stringify(twinSnapshotSection(ok([bare])))).toBe(JSON.stringify(twinSnapshotSection(ok([enriched]))));
