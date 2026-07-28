@@ -2,6 +2,7 @@ from datetime import date
 
 from pydantic import BaseModel, Field, field_validator
 
+from app.logic.confidence_presentation import ConfidenceStatus
 from app.logic.onboarding_state import validate_dob
 
 
@@ -42,7 +43,10 @@ class OnboardingTwinSummary(BaseModel):
     seeded: bool
     seed_status: str  # initial_seed_status_rollup_v1: none|experience_prior_only|benchmark_seeded|mixed
     provisional: bool
-    overall_confidence: str | None  # worst-axis band (established|provisional|insufficient), live variance
+    # Worst-axis band over the seeded axes, from live variance. Same canonical
+    # band as the assessment card and the per-axis snapshot statuses — typed from
+    # the one Literal so all three publish the same enum.
+    overall_confidence: ConfidenceStatus | None
 
 
 class OnboardingStateResponse(BaseModel):
