@@ -4,7 +4,8 @@ import { cn } from "@/lib/utils";
 import { useAuth } from "@/auth/useAuth";
 import { usePerfLab } from "./store";
 import type { Screen } from "./store";
-import { Track } from "./ui";
+import { AuthedSidebarBlock } from "./sidebar/AuthedSidebarBlock";
+import { GuestSidebarBlock } from "./sidebar/GuestSidebarBlock";
 
 /** First letter of up to the first two words; falls back to the first two chars. */
 function initialsFor(name: string): string {
@@ -157,18 +158,11 @@ export function Sidebar() {
       </nav>
 
       <div className="side-extra mt-auto flex flex-col gap-[14px]">
-        <div className="rounded-[13px] border border-white/[0.07] bg-white/[0.02] p-[13px]">
-          <div className="flex items-center justify-between">
-            <span className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-faint">
-              Block
-            </span>
-            <span className="font-mono text-[11px] font-semibold leading-none text-ac">Mid-base</span>
-          </div>
-          <div className="mt-[10px]">
-            <Track pct={42} background="linear-gradient(90deg,var(--ac),#7bd6c0)" className="h-[5px]" />
-          </div>
-          <div className="mt-2 text-[11px] font-medium leading-[1.3] text-faint">Week 3 of 7 · build phase</div>
-        </div>
+        {/* The block card is provenance-split: guests get a labelled sample, an
+            authenticated athlete gets the real macrocycle resource or an honest
+            absence. It must never render a literal to a signed-in athlete —
+            see sidebarBlockModel.ts for why this seam exists. */}
+        {isGuest ? <GuestSidebarBlock /> : <AuthedSidebarBlock />}
         <div className="flex items-center gap-[11px] px-1 py-[6px]">
           <div className="grid h-[34px] w-[34px] place-items-center rounded-full border border-white/10 bg-gradient-to-br from-[#2a3550] to-[#1a2030] text-[12px] font-bold leading-none text-soft">
             {initials}

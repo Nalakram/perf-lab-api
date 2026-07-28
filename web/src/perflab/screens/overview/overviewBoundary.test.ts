@@ -163,11 +163,33 @@ function findForbidden(roots: string[], forbidden: Set<string>): Reach {
 
 const p = (...parts: string[]) => join(SRC, ...parts);
 
+// Every authenticated authority-bearing surface, not just the Overview screen.
+//
+// The Overview-only root set is exactly why the sidebar's block card shipped
+// three hardcoded literals ("Mid-base", 42%, "Week 3 of 7 · build phase") to
+// signed-in athletes with no macrocycle at all: the card is always-visible
+// chrome, so the walk starting at AuthedOverview.tsx could never reach it.
+// A surface belongs here if an authenticated athlete can see it and it can
+// assert anything about their own data.
 const AUTHED_ROOTS = [
+  // Overview screen
   p("perflab", "screens", "overview", "AuthedOverview.tsx"),
   p("perflab", "screens", "overview", "overviewModel.ts"),
   p("perflab", "screens", "overview", "overviewLeaves.tsx"),
+  // Always-visible chrome
+  p("perflab", "sidebar", "AuthedSidebarBlock.tsx"),
+  p("perflab", "sidebar", "sidebarBlockModel.ts"),
 ];
+
+// DELIBERATELY NOT A ROOT: overlays/SessionPlayer.tsx.
+//
+// It imports PHASES from sim.ts (SessionPlayer.tsx:5) and that import is
+// legitimate, because the player is a GUEST-ONLY surface: SessionPlayer.tsx:28
+// is `if (token != null) return null`, so an authenticated athlete never sees
+// it. Listing it here would fail this guard for a component that bears no
+// authenticated authority, and the only way to "fix" that failure would be to
+// break the guest preview. Its authenticated behaviour is proved by the
+// rejection test over that boundary, not by import reachability.
 
 const FIXTURE_MODULES = new Set([
   p("perflab", "sim.ts"),

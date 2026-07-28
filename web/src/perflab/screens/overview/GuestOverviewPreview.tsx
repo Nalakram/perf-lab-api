@@ -18,17 +18,11 @@ import { DAYS } from "../../sim";
 import { readinessColor, readinessNote, readinessWord } from "../../readinessPresentation";
 import { OverviewHeader, Snap } from "./overviewLeaves";
 import { TREND_LABEL } from "./overviewModel";
+import { SampleTag } from "../../SampleTag";
 
-const SAMPLE_BADGE = "Sample data";
-
-/** The persistent provenance label. Rendered per section, not once at the top. */
-function SampleTag() {
-  return (
-    <span className="rounded-[5px] border border-mint/25 bg-mint/[0.08] px-[6px] py-[3px] font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.1em] text-[#9ad6c8]">
-      {SAMPLE_BADGE}
-    </span>
-  );
-}
+// The provenance label now lives in its own neutral module so guest surfaces
+// outside this file (the sidebar block card) can carry an identical badge
+// without importing a fixture module.
 
 export function GuestOverviewPreview() {
   const { actions } = usePerfLab();
