@@ -1,10 +1,11 @@
 // src/perflab/screens/HistoryScreen.tsx
 import { useState, type ReactNode } from "react";
 import * as api from "@/api/perfLabClient";
-import { useAuth } from "@/auth/useAuth";
 import type { BenchmarkObservationRead, StateHistorySnapshotRead, WellnessSampleOut, WorkoutLogSummary } from "@/types";
 import { usePerfLab } from "../store";
-import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
+import { useAuthedResource } from "../useAuthedResource";
+import { ResourceState } from "../ResourceState";
+import { resourceData, type AuthedResource } from "../resource";
 import { Card, ScreenHeader, SectionLabel, Track } from "../ui";
 import { Chart, Area, Axis, Bars, TableView, useChart, useVizTheme } from "../viz";
 import { aerobicValue, fatigueDisplayProxy } from "../stateVector";
@@ -118,57 +119,67 @@ const fmtMonth = (iso: string): string => {
 };
 const cell = (v: number | null, suffix = ""): string => (v == null ? "—" : `${v}${suffix}`);
 
-// A small honest note used wherever there is no real data to show.
-function CardNote({ children }: { children: ReactNode }) {
-  return <div className="text-[13px] font-medium leading-[1.5] text-mute">{children}</div>;
-}
-
 // VO₂max progression — derived from the athlete's real field-test benchmark
 // observations (the same series the field-test log below shows), newest first.
 // No signed-in athlete sees a fabricated curve: guests and empty histories get
-// an honest prompt instead.
-function VO2maxCard({ token, obs, loading, error }: {
-  token: string | null;
-  obs: BenchmarkObservationRead[] | null;
-  loading: boolean;
-  error: unknown;
-}) {
+// an honest prompt instead — and, since the card now reads the canonical
+// resource union, those two are no longer the same branch. It shares `obsRes`
+// with the field-test log below, so it deliberately shares that card's copy for
+// a failed load rather than inventing a second wording for one failure.
+function VO2maxCard({ resource }: { resource: AuthedResource<BenchmarkObservationRead[]> }) {
   const shell = (inner: ReactNode) => (
     <Card className="border-mint/[0.18] p-[18px]" style={{ background: "linear-gradient(120deg,#0f1f1c,#111419 60%)" }}>
       <div className="font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-[#9ad6c8]">VO₂max progression</div>
       {inner}
     </Card>
   );
-  if (!token) return shell(<div className="mt-3"><CardNote>Sign in and log a field test to track your VO₂max.</CardNote></div>);
-  if (loading) return shell(<div className="mt-3"><CardNote>Loading field tests…</CardNote></div>);
-  if (error || !obs || obs.length === 0) return shell(<div className="mt-3"><CardNote>No field tests logged yet — record one in Assess.</CardNote></div>);
-
-  const latest = obs[0].raw_value;
-  const spark = obs.slice(0, 4).reverse(); // oldest→newest of the last few
-  const first = spark[0];
-  const delta = spark.length >= 2 ? latest - first.raw_value : null;
   return shell(
-    <>
-      <div className="mt-3 flex items-end gap-2">
-        <span className="font-mono text-[28px] font-semibold leading-none text-ink">{latest.toFixed(1)}</span>
-        {delta != null && (
-          <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
-            {delta >= 0 ? "+" : "−"}{Math.abs(delta).toFixed(1)} since {fmtMonth(first.observed_at)}
-          </span>
-        )}
-      </div>
-      <div className="mt-3 font-mono text-[11px] leading-none text-mute">
-        {spark.map((o) => o.raw_value.toFixed(1)).join(" → ")}
-      </div>
-    </>,
+    <ResourceState
+      resource={resource}
+      isEmpty={(rows) => rows.length === 0}
+      variant="note"
+      className="mt-3"
+      guest={{ body: "Sign in and log a field test to track your VO₂max." }}
+      loadingContent={{ body: "Loading field tests…" }}
+      error={{ body: "Couldn't load your field tests — try again." }}
+      empty={{ body: "No field tests logged yet — record one in Assess." }}
+      staleLabel="Couldn't refresh your field tests — showing your last loaded results."
+    >
+      {(obs) => {
+        const latest = obs[0].raw_value;
+        const spark = obs.slice(0, 4).reverse(); // oldest→newest of the last few
+        const first = spark[0];
+        const delta = spark.length >= 2 ? latest - first.raw_value : null;
+        return (
+          <>
+            <div className="mt-3 flex items-end gap-2">
+              <span className="font-mono text-[28px] font-semibold leading-none text-ink">{latest.toFixed(1)}</span>
+              {delta != null && (
+                <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
+                  {delta >= 0 ? "+" : "−"}{Math.abs(delta).toFixed(1)} since {fmtMonth(first.observed_at)}
+                </span>
+              )}
+            </div>
+            <div className="mt-3 font-mono text-[11px] leading-none text-mute">
+              {spark.map((o) => o.raw_value.toFixed(1)).join(" → ")}
+            </div>
+          </>
+        );
+      }}
+    </ResourceState>,
   );
 }
 
 // Aerobic capacity — the decomposed aerobic capacity axis from the latest real
 // snapshot, compared against the oldest snapshot currently loaded (the window
 // start, not a durable "base"). Track fills against the twin's aerobic ceiling.
-function AerobicCapacityCard({ token, latest, windowStart }: {
-  token: string | null;
+//
+// It renders the SAME history resource the readiness chart does, so it takes the
+// resource for branch selection and the already-windowed endpoints as props —
+// one window derivation (one clock read) feeds both, and the two cards can never
+// disagree about which snapshots are in view.
+function AerobicCapacityCard({ resource, latest, windowStart }: {
+  resource: AuthedResource<StateHistorySnapshotRead[]>;
   latest: StateHistorySnapshotRead | null;
   windowStart: StateHistorySnapshotRead | null;
 }) {
@@ -178,119 +189,135 @@ function AerobicCapacityCard({ token, latest, windowStart }: {
       {inner}
     </Card>
   );
-  if (!token) return shell(<div className="mt-3"><CardNote>Sign in to track your aerobic capacity.</CardNote></div>);
-  if (!latest) return shell(<div className="mt-3"><CardNote>Not enough history yet — log training to build the trend.</CardNote></div>);
-
-  const val = aerobicValue(latest);
-  const delta = windowStart ? val - aerobicValue(windowStart) : null;
-  const pct = Math.max(0, Math.min(100, (val / AEROBIC_CEILING) * 100));
   return shell(
-    <>
-      <div className="mt-3 flex items-end gap-2">
-        <span className="font-mono text-[28px] font-semibold leading-none text-ink">{Math.round(val)}</span>
-        {delta != null && (
-          <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
-            {delta >= 0 ? "+" : "−"}{Math.abs(Math.round(delta))} vs window start
-          </span>
-        )}
-      </div>
-      <Track pct={pct} background="linear-gradient(90deg,var(--ac),#a7e36e)" className="mt-3 h-[6px]" />
-    </>,
+    <ResourceState
+      resource={resource}
+      // "Empty" here is the editorial reading of a successful history: rows
+      // exist, but none inside the selected window.
+      isEmpty={() => latest == null}
+      variant="note"
+      className="mt-3"
+      guest={{ body: "Sign in to track your aerobic capacity." }}
+      loadingContent={{ body: "Loading history…" }}
+      error={{ body: "Couldn't load your history — try again." }}
+      empty={{ body: "Not enough history yet — log training to build the trend." }}
+      staleLabel="Couldn't refresh your history — showing your last loaded capacity."
+    >
+      {() => {
+        // `isEmpty` already routed a null `latest` to the empty branch; this
+        // guard is only what TypeScript needs to narrow the prop.
+        if (!latest) return null;
+        const val = aerobicValue(latest);
+        const delta = windowStart ? val - aerobicValue(windowStart) : null;
+        const pct = Math.max(0, Math.min(100, (val / AEROBIC_CEILING) * 100));
+        return (
+          <>
+            <div className="mt-3 flex items-end gap-2">
+              <span className="font-mono text-[28px] font-semibold leading-none text-ink">{Math.round(val)}</span>
+              {delta != null && (
+                <span className={`mb-1 text-[11px] font-medium leading-none ${delta >= 0 ? "text-good" : "text-hot"}`}>
+                  {delta >= 0 ? "+" : "−"}{Math.abs(Math.round(delta))} vs window start
+                </span>
+              )}
+            </div>
+            <Track pct={pct} background="linear-gradient(90deg,var(--ac),#a7e36e)" className="mt-3 h-[6px]" />
+          </>
+        );
+      }}
+    </ResourceState>,
   );
 }
 
 // Recent wellness — real daily samples from GET /v1/wellness. Renders live rows
 // when the athlete has logged check-ins; guests and empty histories get a note
-// rather than a mock series.
+// rather than a mock series, and they are now distinct branches rather than one
+// "no data" fallthrough.
 function RecentWellnessCard() {
-  const { token } = useAuth();
-  const { data, loading, error } = useAuthedResource<WellnessSampleOut[]>((t) => api.listWellness(t, 10), []);
-
-  const body = !token ? (
-    <CardNote>Sign in and log a check-in to track your wellness here.</CardNote>
-  ) : loading ? (
-    <div className="text-[13px] font-medium text-mute">Loading recent samples…</div>
-  ) : error || !data || data.length === 0 ? (
-    <CardNote>No wellness logged yet — use Check-in to record sleep, HRV and resting HR.</CardNote>
-  ) : (
-    <>
-      <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] gap-2 border-b border-white/[0.07] py-[10px] font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.1em] text-dim">
-        <span>Date</span><span>HRV</span><span>Sleep</span><span>RHR</span><span>Mood</span>
-      </div>
-      {data.map((w) => (
-        <div key={w.id} className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] items-center gap-2 border-b border-white/[0.05] py-[12px] last:border-0">
-          <span className="text-[13px] font-semibold leading-none text-ink">{fmtDay(w.date)}</span>
-          <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.hrv_ms, " ms")}</span>
-          <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.sleep_hours, " h")}</span>
-          <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.resting_hr)}</span>
-          <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.mood)}</span>
-        </div>
-      ))}
-    </>
-  );
+  const wellnessRes = useAuthedResource<WellnessSampleOut[]>((t) => api.listWellness(t, 10), []);
 
   return (
     <Card className="px-[22px] py-5">
       <SectionLabel className="mb-2">Recent wellness</SectionLabel>
-      {body}
+      <ResourceState
+        resource={wellnessRes}
+        isEmpty={(rows) => rows.length === 0}
+        variant="note"
+        guest={{ body: "Sign in and log a check-in to track your wellness here." }}
+        loadingContent={{ body: "Loading recent samples…" }}
+        error={{ body: "Couldn't load your wellness — try again." }}
+        empty={{ body: "No wellness logged yet — use Check-in to record sleep, HRV and resting HR." }}
+        staleLabel="Couldn't refresh your wellness — showing your last loaded samples."
+      >
+        {(samples) => (
+          <>
+            <div className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] gap-2 border-b border-white/[0.07] py-[10px] font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.1em] text-dim">
+              <span>Date</span><span>HRV</span><span>Sleep</span><span>RHR</span><span>Mood</span>
+            </div>
+            {samples.map((w) => (
+              <div key={w.id} className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] items-center gap-2 border-b border-white/[0.05] py-[12px] last:border-0">
+                <span className="text-[13px] font-semibold leading-none text-ink">{fmtDay(w.date)}</span>
+                <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.hrv_ms, " ms")}</span>
+                <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.sleep_hours, " h")}</span>
+                <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.resting_hr)}</span>
+                <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.mood)}</span>
+              </div>
+            ))}
+          </>
+        )}
+      </ResourceState>
     </Card>
   );
 }
 
-function FieldTestLogCard({ token, data, loading, error }: {
-  token: string | null;
-  data: BenchmarkObservationRead[] | null;
-  loading: boolean;
-  error: unknown;
-}) {
-  const body = !token ? (
-    <CardNote>Sign in and log a field test to see your results here.</CardNote>
-  ) : loading ? (
-    <div className="text-[13px] font-medium text-mute">Loading field tests…</div>
-  ) : error ? (
-    <CardNote>Couldn&apos;t load your field tests — try again.</CardNote>
-  ) : !data || data.length === 0 ? (
-    <CardNote>No field tests logged yet — record one in Assess.</CardNote>
-  ) : (
-    <TableView
-      columns={[
-        { key: "date", label: "Date" },
-        { key: "vo2", label: "VO₂max", numeric: true },
-        { key: "aerobicScore", label: "Aerobic score", numeric: true },
-        { key: "validity", label: "Validity" },
-      ]}
-      rows={data.map((observation, index) => ({
-        date: (
-          <span className="font-semibold text-ink">
-            {fmtDay(observation.observed_at)}
-            {index === 0 && <span className="ml-1 text-[10px] font-medium text-ac">latest</span>}
-          </span>
-        ),
-        vo2: (
-          <span className={index === 0 ? "font-semibold text-teal" : "font-semibold"}>
-            {observation.raw_value.toFixed(1)}
-          </span>
-        ),
-        aerobicScore: cell(
-          observation.normalized_value == null ? null : Math.round(observation.normalized_value),
-          "/100",
-        ),
-        validity: observation.validity_status,
-      }))}
-    />
-  );
-
+function FieldTestLogCard({ resource }: { resource: AuthedResource<BenchmarkObservationRead[]> }) {
   return (
     <Card className="px-[22px] py-5">
       <SectionLabel className="mb-2">Field test log</SectionLabel>
-      {body}
+      <ResourceState
+        resource={resource}
+        isEmpty={(rows) => rows.length === 0}
+        variant="note"
+        guest={{ body: "Sign in and log a field test to see your results here." }}
+        loadingContent={{ body: "Loading field tests…" }}
+        error={{ body: "Couldn't load your field tests — try again." }}
+        empty={{ body: "No field tests logged yet — record one in Assess." }}
+        staleLabel="Couldn't refresh your field tests — showing your last loaded results."
+      >
+        {(observations) => (
+          <TableView
+            columns={[
+              { key: "date", label: "Date" },
+              { key: "vo2", label: "VO₂max", numeric: true },
+              { key: "aerobicScore", label: "Aerobic score", numeric: true },
+              { key: "validity", label: "Validity" },
+            ]}
+            rows={observations.map((observation, index) => ({
+              date: (
+                <span className="font-semibold text-ink">
+                  {fmtDay(observation.observed_at)}
+                  {index === 0 && <span className="ml-1 text-[10px] font-medium text-ac">latest</span>}
+                </span>
+              ),
+              vo2: (
+                <span className={index === 0 ? "font-semibold text-teal" : "font-semibold"}>
+                  {observation.raw_value.toFixed(1)}
+                </span>
+              ),
+              aerobicScore: cell(
+                observation.normalized_value == null ? null : Math.round(observation.normalized_value),
+                "/100",
+              ),
+              validity: observation.validity_status,
+            }))}
+          />
+        )}
+      </ResourceState>
     </Card>
   );
 }
 
 export function HistoryScreen() {
   const { actions } = usePerfLab();
-  const { token } = useAuth();
   const { accent, colors } = useVizTheme();
   const [range, setRange] = useState<Range>("12w");
 
@@ -306,20 +333,22 @@ export function HistoryScreen() {
   const weeks = RANGE_WEEKS[range];
 
   // Readiness history, filtered to the selected window (real data only).
-  const allHistory = token ? historyRes.data : null;
-  const visibleHistory = allHistory ? filterHistoryWindow(allHistory, weeks) : null;
-  const hasHistory = !!(visibleHistory && visibleHistory.length);
-  const readinessSeries = hasHistory ? visibleHistory!.map(fatigueDisplayProxy) : [];
+  // `resourceData` yields rows on the success branch only, so a guest, a first
+  // load and a failed load all derive to "nothing to plot" — and the branch that
+  // says WHICH of those it is stays with <ResourceState> below, never re-derived
+  // from a null payload here.
+  const historyRows = resourceData(historyRes);
+  const visibleHistory = historyRows ? filterHistoryWindow(historyRows, weeks) : [];
+  const readinessSeries = visibleHistory.map(fatigueDisplayProxy);
   const N = readinessSeries.length;
-  const latestReadiness = hasHistory ? readinessSeries[N - 1] : null;
+  const latestReadiness = N > 0 ? readinessSeries[N - 1] : null;
   const hDiff = N >= 2 ? readinessSeries[N - 1] - readinessSeries[0] : null;
   const hDelta = hDiff == null ? "" : `${hDiff >= 0 ? "+" : "−"}${Math.abs(hDiff)} vs window start`;
-  const latestSnap = hasHistory ? visibleHistory![N - 1] : null;
-  const windowStartSnap = hasHistory ? visibleHistory![0] : null;
+  const latestSnap = N > 0 ? visibleHistory[N - 1] : null;
+  const windowStartSnap = N > 0 ? visibleHistory[0] : null;
 
   // Weekly load over the same window (real workouts only; null → empty state).
-  const realLoad = token ? weeklyLoad(workoutsRes.data, weeks) : null;
-  const hasLoad = !!(realLoad && realLoad.length);
+  const realLoad = weeklyLoad(resourceData(workoutsRes), weeks);
   const loadSeries = realLoad ?? [];
   const loadMax = Math.max(1, ...loadSeries) * 1.1;
   const nowIdx = loadSeries.length - 1;
@@ -341,8 +370,9 @@ export function HistoryScreen() {
   // Time-travel the twin from a clicked readiness dot — hand it the CLICKED ROW's
   // snapshot_id (its durable identity), never the chart index.
   const goDay = (i: number) => {
-    if (hasHistory && visibleHistory![i]) {
-      actions.setSelectedTwinSnapshot(visibleHistory![i].snapshot_id);
+    const picked = visibleHistory[i];
+    if (picked) {
+      actions.setSelectedTwinSnapshot(picked.snapshot_id);
       actions.setScreen("twin");
     }
   };
@@ -376,31 +406,41 @@ export function HistoryScreen() {
             </div>
             <div className="text-right font-mono text-[10px] leading-none text-dim">click a point to time-travel</div>
           </div>
-          {!token ? (
-            <div className="flex h-[170px] items-center justify-center"><CardNote>Sign in to see your readiness trend.</CardNote></div>
-          ) : historyRes.loading ? (
-            <div className="flex h-[170px] items-center justify-center"><div className="text-[13px] font-medium text-mute">Loading history…</div></div>
-          ) : !hasHistory || N < 2 ? (
-            <div className="flex h-[170px] items-center justify-center"><CardNote>Not enough history in this window yet — log training or widen the range.</CardNote></div>
-          ) : (
-            <Chart
-              width={600}
-              height={180}
-              padding={{ top: 14, right: 10, bottom: 15, left: 10 }}
-              xDomain={[0, N - 1]}
-              yDomain={[20, 100]}
-              ariaLabel="Readiness across the selected window"
-              className="mt-1 h-[170px] w-full"
-            >
-              <Axis y yTicks={3} />
-              <Area data={readinessSeries.map((r, i) => [i, r] as [number, number])} color={accent} />
-              <DayMarkers readiness={readinessSeries} onPick={goDay} color={accent} />
-            </Chart>
-          )}
+          <ResourceState
+            resource={historyRes}
+            // A single point cannot draw a trend, so it reads as "not enough
+            // history" — an editorial reading of successful data, which is
+            // exactly what `isEmpty` is for. It closes over `N` rather than
+            // re-filtering so the chart and the header above it always agree.
+            isEmpty={() => N < 2}
+            variant="note"
+            className="flex h-[170px] items-center justify-center"
+            guest={{ body: "Sign in to see your readiness trend." }}
+            loadingContent={{ body: "Loading history…" }}
+            error={{ body: "Couldn't load your history — try again." }}
+            empty={{ body: "Not enough history in this window yet — log training or widen the range." }}
+            staleLabel="Couldn't refresh your history — showing your last loaded trend."
+          >
+            {() => (
+              <Chart
+                width={600}
+                height={180}
+                padding={{ top: 14, right: 10, bottom: 15, left: 10 }}
+                xDomain={[0, N - 1]}
+                yDomain={[20, 100]}
+                ariaLabel="Readiness across the selected window"
+                className="mt-1 h-[170px] w-full"
+              >
+                <Axis y yTicks={3} />
+                <Area data={readinessSeries.map((r, i) => [i, r] as [number, number])} color={accent} />
+                <DayMarkers readiness={readinessSeries} onPick={goDay} color={accent} />
+              </Chart>
+            )}
+          </ResourceState>
         </Card>
         <div className="flex flex-col gap-4">
-          <VO2maxCard token={token} obs={obsRes.data} loading={obsRes.loading} error={obsRes.error} />
-          <AerobicCapacityCard token={token} latest={latestSnap} windowStart={windowStartSnap} />
+          <VO2maxCard resource={obsRes} />
+          <AerobicCapacityCard resource={historyRes} latest={latestSnap} windowStart={windowStartSnap} />
         </div>
       </div>
 
@@ -412,59 +452,67 @@ export function HistoryScreen() {
             <SectionLabel>Weekly training load</SectionLabel>
             <div className="text-[11px] font-medium leading-none text-dim">volume load · last {weeks} weeks</div>
           </div>
-          {!token ? (
-            <div className="flex h-[140px] items-center justify-center"><CardNote>Sign in to see your training load.</CardNote></div>
-          ) : workoutsRes.loading ? (
-            <div className="flex h-[140px] items-center justify-center"><div className="text-[13px] font-medium text-mute">Loading training load…</div></div>
-          ) : !hasLoad ? (
-            <div className="flex h-[140px] items-center justify-center"><CardNote>No training logged in this window — log a session or widen the range.</CardNote></div>
-          ) : (
-            <>
-              <div className="mb-4 flex flex-wrap gap-x-7 gap-y-3">
-                <div>
-                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">This week</div>
-                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(thisWeek)}</div>
-                </div>
-                <div>
-                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">vs last wk</div>
-                  <div className={`mt-[6px] font-mono text-[22px] font-semibold leading-none ${wowDelta == null ? "text-dim" : wowDelta >= 0 ? "text-good" : "text-hot"}`}>
-                    {wowDelta == null ? "—" : `${wowDelta >= 0 ? "+" : "−"}${Math.abs(wowDelta * 100).toFixed(0)}%`}
+          <ResourceState
+            resource={workoutsRes}
+            // Logged workouts that all fall outside the selected window are a
+            // successful-but-empty read, not a failed one.
+            isEmpty={() => loadSeries.length === 0}
+            variant="note"
+            className="flex h-[140px] items-center justify-center"
+            guest={{ body: "Sign in to see your training load." }}
+            loadingContent={{ body: "Loading training load…" }}
+            error={{ body: "Couldn't load your training load — try again." }}
+            empty={{ body: "No training logged in this window — log a session or widen the range." }}
+            staleLabel="Couldn't refresh your training load — showing your last loaded weeks."
+          >
+            {() => (
+              <>
+                <div className="mb-4 flex flex-wrap gap-x-7 gap-y-3">
+                  <div>
+                    <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">This week</div>
+                    <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(thisWeek)}</div>
+                  </div>
+                  <div>
+                    <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">vs last wk</div>
+                    <div className={`mt-[6px] font-mono text-[22px] font-semibold leading-none ${wowDelta == null ? "text-dim" : wowDelta >= 0 ? "text-good" : "text-hot"}`}>
+                      {wowDelta == null ? "—" : `${wowDelta >= 0 ? "+" : "−"}${Math.abs(wowDelta * 100).toFixed(0)}%`}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">{weeks}-wk avg</div>
+                    <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(avgLoad)}</div>
+                  </div>
+                  <div>
+                    <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">Peak</div>
+                    <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">
+                      {fmtLoad(peakVal)}<span className="ml-[3px] text-[12px] font-medium text-mute">· W{peakWk}</span>
+                    </div>
                   </div>
                 </div>
-                <div>
-                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">{weeks}-wk avg</div>
-                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">{fmtLoad(avgLoad)}</div>
-                </div>
-                <div>
-                  <div className="font-mono text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">Peak</div>
-                  <div className="mt-[6px] font-mono text-[22px] font-semibold leading-none text-ink">
-                    {fmtLoad(peakVal)}<span className="ml-[3px] text-[12px] font-medium text-mute">· W{peakWk}</span>
-                  </div>
-                </div>
-              </div>
-              <Chart
-                width={600}
-                height={100}
-                padding={{ top: 6, right: 2, bottom: 2, left: 2 }}
-                yDomain={[0, loadMax]}
-                ariaLabel={`Weekly training load, last ${weeks} weeks`}
-                className="h-[100px] w-full"
-              >
-                <Bars
-                  data={loadSeries.map((v, i) => ({ key: `W${i + 1}`, value: v }))}
-                  color="series"
-                  baseColor={colors.categorical[1]}
-                  emphasisKey={`W${nowIdx + 1}`}
-                />
-              </Chart>
-              <div className="mt-[10px] flex justify-between font-mono text-[9px] leading-none text-dim"><span>W1</span><span>W{weeks} · now</span></div>
-            </>
-          )}
+                <Chart
+                  width={600}
+                  height={100}
+                  padding={{ top: 6, right: 2, bottom: 2, left: 2 }}
+                  yDomain={[0, loadMax]}
+                  ariaLabel={`Weekly training load, last ${weeks} weeks`}
+                  className="h-[100px] w-full"
+                >
+                  <Bars
+                    data={loadSeries.map((v, i) => ({ key: `W${i + 1}`, value: v }))}
+                    color="series"
+                    baseColor={colors.categorical[1]}
+                    emphasisKey={`W${nowIdx + 1}`}
+                  />
+                </Chart>
+                <div className="mt-[10px] flex justify-between font-mono text-[9px] leading-none text-dim"><span>W1</span><span>W{weeks} · now</span></div>
+              </>
+            )}
+          </ResourceState>
         </Card>
         <LoadBalanceCard acwr={acwr} acute={thisWeek} chronic={chronic} />
       </div>
 
-      <FieldTestLogCard token={token} data={obsRes.data} loading={obsRes.loading} error={obsRes.error} />
+      <FieldTestLogCard resource={obsRes} />
     </section>
   );
 }

@@ -7,7 +7,11 @@
 
 import { createContext, useContext } from "react";
 import type { Dispatch } from "react";
-import { PHASES } from "./sim";
+// NOTE: sim.ts is imported for TYPES ONLY. The store used to value-import `PHASES`
+// and index it inside the session reducer, which put a fabricated interval plan on
+// the import path of every component that calls usePerfLab() — i.e. every screen.
+// The phase durations now arrive with the openSession action, so the session state
+// machine is generic and the fixture stays with the surface that renders it.
 import type { CheckinState, SimParams } from "./sim";
 import type { MetricsResponse, ReadinessScore, UnifiedStateVector } from "../types";
 
@@ -101,6 +105,9 @@ export interface PerfLabState {
   sessRemaining: number;
   sessRunning: boolean;
   sessDone: boolean;
+  /** Durations (seconds) of the phases the open session is stepping through,
+   *  supplied by whoever opened it. Empty when no session is open. */
+  sessPhaseDurations: number[];
   settings: Settings;
   explainOpen: boolean;
   explainKey: string | null;
@@ -179,6 +186,7 @@ export function initialState(): PerfLabState {
     sessOpen: false,
     phaseIdx: 0,
     sessRemaining: 600,
+    sessPhaseDurations: [],
     sessRunning: false,
     sessDone: false,
     settings: {
@@ -217,7 +225,7 @@ export type Action =
   | { type: "mergeSettings"; patch: Partial<Settings> }
   | { type: "mergeCheckin"; patch: Partial<CheckinState> }
   | { type: "mergeSim"; patch: Partial<SimParams> }
-  | { type: "openSession" }
+  | { type: "openSession"; phaseDurations: number[] }
   | { type: "sessSkip" }
   | { type: "sessToggle" }
   | { type: "tick" };
@@ -234,20 +242,37 @@ export function reducer(state: PerfLabState, action: Action): PerfLabState {
       return { ...state, checkin: { ...state.checkin, ...action.patch } };
     case "mergeSim":
       return { ...state, sim: { ...state.sim, ...action.patch } };
-    case "openSession":
-      return { ...state, sessOpen: true, phaseIdx: 0, sessRemaining: PHASES[0].dur, sessRunning: false, sessDone: false };
+    case "openSession": {
+      const durations = action.phaseDurations;
+      return {
+        ...state,
+        sessOpen: true,
+        phaseIdx: 0,
+        sessPhaseDurations: durations,
+        sessRemaining: durations[0] ?? 0,
+        sessRunning: false,
+        sessDone: false,
+      };
+    }
     case "sessToggle":
       if (state.sessRunning) return { ...state, sessRunning: false };
-      if (state.sessDone) return { ...state, phaseIdx: 0, sessRemaining: PHASES[0].dur, sessRunning: false, sessDone: false };
+      if (state.sessDone)
+        return {
+          ...state,
+          phaseIdx: 0,
+          sessRemaining: state.sessPhaseDurations[0] ?? 0,
+          sessRunning: false,
+          sessDone: false,
+        };
       return { ...state, sessRunning: true };
     case "sessSkip":
     case "tick": {
       if (action.type === "tick" && state.sessRemaining > 1) {
         return { ...state, sessRemaining: state.sessRemaining - 1 };
       }
-      if (state.phaseIdx < PHASES.length - 1) {
+      if (state.phaseIdx < state.sessPhaseDurations.length - 1) {
         const next = state.phaseIdx + 1;
-        return { ...state, phaseIdx: next, sessRemaining: PHASES[next].dur };
+        return { ...state, phaseIdx: next, sessRemaining: state.sessPhaseDurations[next] };
       }
       return { ...state, sessRunning: false, sessDone: true };
     }
@@ -279,7 +304,8 @@ export interface PerfLabActions {
   /** Select a live twin snapshot by its persisted row id (null = newest). */
   setSelectedTwinSnapshot: (id: number | null) => void;
   setCapView: (v: "bars" | "radar") => void;
-  openSession: () => void;
+  /** Open the session player over an explicit phase plan (durations in seconds). */
+  openSession: (phaseDurations: number[]) => void;
   closeSession: () => void;
   sessToggle: () => void;
   sessSkip: () => void;
@@ -348,7 +374,7 @@ export function buildActions(dispatch: Dispatch<Action>): PerfLabActions {
     setTwinDay: (i) => merge({ twinDayIdx: i }),
     setSelectedTwinSnapshot: (id) => merge({ selectedTwinSnapshotId: id }),
     setCapView: (v) => merge({ capView: v }),
-    openSession: () => dispatch({ type: "openSession" }),
+    openSession: (phaseDurations) => dispatch({ type: "openSession", phaseDurations }),
     closeSession: () => merge({ sessOpen: false, sessRunning: false }),
     sessToggle: () => dispatch({ type: "sessToggle" }),
     sessSkip: () => dispatch({ type: "sessSkip" }),

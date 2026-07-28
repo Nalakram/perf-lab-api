@@ -21,7 +21,8 @@ import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { ReadinessScore, StateHistorySnapshotRead, WorkoutPrescription } from "@/types";
 import { usePerfLab } from "../store";
-import { useLegacyAuthedResource as useAuthedResource, type Resource } from "../useAuthedResource";
+import { useAuthedResource } from "../useAuthedResource";
+import { assertNever, resourceData, type AuthedResource } from "../resource";
 import { Card, MetricBar, Pill, ReadinessRing, SectionLabel, SyncChip } from "../ui";
 import { Chart, Line, Marker, useVizTheme } from "../viz";
 import { meanFatigue, relativeTime } from "../stateVector";
@@ -30,7 +31,8 @@ import { GuestTwinPreview } from "./twin/GuestTwinPreview";
 import { MiniTile } from "./twin/MiniTile";
 import { TissueBodyMap } from "./twin/TissueBodyMap";
 import { viewingLabel } from "./twin/viewingLabel";
-import { FATIGUE_ORDER, fatigueColor, readinessColor, readinessNote, readinessWord } from "../sim";
+import { FATIGUE_ORDER, fatigueColor } from "../sim";
+import { readinessColor, readinessNote, readinessWord } from "../readinessPresentation";
 
 // meanFatigue + relativeTime come from the shared ../stateVector module, and
 // viewingLabel from ./twin/viewingLabel — no longer copied module-local.
@@ -47,15 +49,7 @@ export function TwinScreen() {
   const readinessRes = useAuthedResource<ReadinessScore>((t) => api.getReadiness(t), [state.readinessRefreshKey]);
 
   const isGuest = token == null;
-  const rows = historyRes.data;
-  const newest = rows && rows.length ? rows[rows.length - 1] : null;
-  const syncLabel = isGuest
-    ? "Preview"
-    : newest
-      ? `Synced ${relativeTime(newest.timestamp)}`
-      : historyRes.loading
-        ? "Syncing…"
-        : "No recorded state";
+  const syncLabel = isGuest ? "Preview" : twinSyncLabel(historyRes);
 
   return (
     <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
@@ -72,35 +66,74 @@ export function TwinScreen() {
   );
 }
 
+/**
+ * The header sync chip, read off the four availability states rather than a
+ * loading flag. "Syncing…" covers a request in flight with nothing recorded to
+ * show yet — including a refresh over a window that came back empty.
+ */
+function twinSyncLabel(resource: AuthedResource<StateHistorySnapshotRead[]>): string {
+  switch (resource.status) {
+    case "guest":
+      return "Preview";
+    case "loading":
+      return "Syncing…";
+    case "error":
+      return "No recorded state";
+    case "success": {
+      const rows = resource.data;
+      const newest = rows.length ? rows[rows.length - 1] : null;
+      if (newest) return `Synced ${relativeTime(newest.timestamp)}`;
+      return resource.refresh.status === "loading" ? "Syncing…" : "No recorded state";
+    }
+    default:
+      return assertNever(resource);
+  }
+}
+
 // ============================ AUTHENTICATED (LIVE) ============================
 
 function AuthedTwinBody({
   historyRes,
   readinessRes,
 }: {
-  historyRes: Resource<StateHistorySnapshotRead[]>;
-  readinessRes: Resource<ReadinessScore>;
+  historyRes: AuthedResource<StateHistorySnapshotRead[]>;
+  readinessRes: AuthedResource<ReadinessScore>;
 }) {
   const { state, actions } = usePerfLab();
   const { accent } = useVizTheme();
+
+  // The four-state ladder, now over the union: an exhaustive switch (this body
+  // is a whole screen region, not a card, so <ResourceState> is the wrong
+  // consumer). Order is the canonical one — guest → loading → error → empty.
+  switch (historyRes.status) {
+    // ---- GUEST: unreachable — TwinScreen routes guests to <GuestTwinPreview/>
+    // before this body mounts. It is emphatically NOT the empty state below.
+    case "guest":
+      return null;
+    // ---- LOADING: neutral skeletons, never sim ----
+    case "loading":
+      return <TwinSkeleton />;
+    // ---- ERROR: honest retry, distinct from empty (no sim, no manufactured 50s) ----
+    case "error":
+      return (
+        <Card className="px-[22px] py-8 text-center">
+          <div className="text-[14px] font-semibold text-ink">Couldn&apos;t load your twin</div>
+          <div className="mx-auto mt-2 max-w-[420px] text-[12.5px] font-medium leading-[1.5] text-mute">{historyRes.error.message}</div>
+          <div className="mt-2 text-[12px] font-medium text-dim">Reload to try again.</div>
+        </Card>
+      );
+    // A usable window is on screen; a failed refresh over it stays here rather
+    // than collapsing to the error card.
+    case "success":
+      break;
+    default:
+      return assertNever(historyRes);
+  }
+
   const rows = historyRes.data;
 
-  // ---- LOADING: neutral skeletons, never sim ----
-  if (historyRes.loading && !rows) {
-    return <TwinSkeleton />;
-  }
-  // ---- ERROR: honest retry, distinct from empty (no sim, no manufactured 50s) ----
-  if (historyRes.error && !rows) {
-    return (
-      <Card className="px-[22px] py-8 text-center">
-        <div className="text-[14px] font-semibold text-ink">Couldn&apos;t load your twin</div>
-        <div className="mx-auto mt-2 max-w-[420px] text-[12.5px] font-medium leading-[1.5] text-mute">{historyRes.error}</div>
-        <div className="mt-2 text-[12px] font-medium text-dim">Reload to try again.</div>
-      </Card>
-    );
-  }
   // ---- EMPTY: real empty prompt (never default 50s) ----
-  if (!rows || rows.length === 0) {
+  if (rows.length === 0) {
     return (
       <Card className="px-[22px] py-8 text-center">
         <div className="text-[14px] font-semibold text-ink">No twin state yet</div>
@@ -138,7 +171,7 @@ function AuthedTwinBody({
   const sparkData = rows.map((r, i) => [i, meanFatigue(r)] as [number, number]);
 
   // Canonical readiness for the LATEST snapshot only (PDR-0005: never recompute).
-  const canonicalScore = readinessRes.data?.score ?? null;
+  const canonicalScore = resourceData(readinessRes)?.score ?? null;
 
   // ---- Fatigue / tissue: live decomposed axes (guarded for optional fields) ----
   const fRec = (row.fatigue_f ?? {}) as Record<string, number>;
@@ -264,7 +297,7 @@ function ReadinessCard({
 }: {
   isLatest: boolean;
   canonicalScore: number | null;
-  readinessRes: Resource<ReadinessScore>;
+  readinessRes: AuthedResource<ReadinessScore>;
   meanF: number;
 }) {
   // HISTORICAL snapshot: a neutral, non-scored ring + an honest message and a
@@ -309,11 +342,32 @@ function ReadinessCard({
       <div>
         <SectionLabel className="text-faint">Readiness</SectionLabel>
         <div className="mt-2 text-[12.5px] font-medium leading-[1.5] text-mute">
-          {readinessRes.loading ? "Loading your readiness…" : "Readiness isn't available yet — check in or log a workout."}
+          {readinessPendingNote(readinessRes)}
         </div>
       </div>
     </Card>
   );
+}
+
+/**
+ * Copy for "latest snapshot, but no canonical score to show". Only reached when
+ * no score is in hand, so a refresh still in flight over a scoreless payload
+ * reads the same as a first load — which is what the old flag did too.
+ */
+function readinessPendingNote(resource: AuthedResource<ReadinessScore>): string {
+  switch (resource.status) {
+    case "loading":
+      return "Loading your readiness…";
+    case "success":
+      return resource.refresh.status === "loading"
+        ? "Loading your readiness…"
+        : "Readiness isn't available yet — check in or log a workout.";
+    case "guest":
+    case "error":
+      return "Readiness isn't available yet — check in or log a workout.";
+    default:
+      return assertNever(resource);
+  }
 }
 
 /** A greyed, non-scored ring shell for historical / unavailable readiness. */
@@ -345,6 +399,52 @@ function TwinSkeleton() {
   );
 }
 
+/**
+ * Which single body the card shows, and the summary beside its label. The card
+ * frame and header are always present, so the notice markup of <ResourceState>
+ * would not fit; this is the exhaustive-switch consumer instead.
+ *
+ * A refresh in flight over a prescription keeps the summary and swaps the body
+ * for "computing"; a failed refresh keeps the summary and shows the
+ * unavailable note — exactly what the flat flags produced.
+ */
+type NextSessionBody =
+  | { kind: "none" }
+  | { kind: "computing" }
+  | { kind: "unavailable" }
+  | { kind: "prescription"; rx: WorkoutPrescription };
+
+function nextSessionView(resource: AuthedResource<WorkoutPrescription>): {
+  summary: string;
+  body: NextSessionBody;
+} {
+  switch (resource.status) {
+    case "guest":
+      // Unreachable: the card returns the signed-out hint before rendering.
+      return { summary: "", body: { kind: "none" } };
+    case "loading":
+      return { summary: "loading…", body: { kind: "computing" } };
+    case "error":
+      return { summary: "", body: { kind: "unavailable" } };
+    case "success": {
+      const rx = resource.data;
+      const summary = `${rx.type} · ${rx.duration_min} min`;
+      switch (resource.refresh.status) {
+        case "loading":
+          return { summary, body: { kind: "computing" } };
+        case "error":
+          return { summary, body: { kind: "unavailable" } };
+        case "idle":
+          return { summary, body: { kind: "prescription", rx } };
+        default:
+          return assertNever(resource.refresh);
+      }
+    }
+    default:
+      return assertNever(resource);
+  }
+}
+
 // Recommended next session — the live prescription from the twin controller
 // (GET /v1/next-session), prescribed for the athlete's chosen training goal
 // (Settings → Training goal). Authenticated only; guests and unseeded twins
@@ -353,10 +453,8 @@ function NextSessionCard() {
   const { token } = useAuth();
   const { state } = usePerfLab();
   const goal = state.settings.goal;
-  const { data: rx, loading, error } = useAuthedResource<WorkoutPrescription>(
-    (t) => api.getNextSession(goal, t),
-    [goal],
-  );
+  const rxRes = useAuthedResource<WorkoutPrescription>((t) => api.getNextSession(goal, t), [goal]);
+  const { summary, body } = nextSessionView(rxRes);
 
   if (!token) {
     return (
@@ -374,24 +472,24 @@ function NextSessionCard() {
       <div className="mb-3 flex items-center justify-between">
         <SectionLabel>Recommended next session</SectionLabel>
         <span className="font-mono text-[10px] leading-none text-dim">
-          {rx ? `${rx.type} · ${rx.duration_min} min` : loading ? "loading…" : ""}
+          {summary}
         </span>
       </div>
-      {loading && <div className="text-[13px] font-medium text-mute">Computing your prescription…</div>}
-      {!loading && error && (
+      {body.kind === "computing" && <div className="text-[13px] font-medium text-mute">Computing your prescription…</div>}
+      {body.kind === "unavailable" && (
         <div className="text-[12.5px] font-medium leading-[1.5] text-mute">
           No live prescription yet — log a workout or run a field test to seed your twin.
         </div>
       )}
-      {!loading && !error && rx && (
+      {body.kind === "prescription" && (
         <div className="flex flex-col gap-4">
           <div>
-            <div className="text-[20px] font-bold leading-tight text-ink">{rx.focus}</div>
-            <div className="mt-1 text-[12.5px] font-medium leading-[1.5] text-mute">{rx.rationale}</div>
+            <div className="text-[20px] font-bold leading-tight text-ink">{body.rx.focus}</div>
+            <div className="mt-1 text-[12.5px] font-medium leading-[1.5] text-mute">{body.rx.rationale}</div>
           </div>
-          {rx.exercises && rx.exercises.length > 0 && (
+          {body.rx.exercises && body.rx.exercises.length > 0 && (
             <div className="flex flex-col gap-2 border-t border-white/[0.06] pt-3">
-              {rx.exercises.map((ex, i) => {
+              {body.rx.exercises.map((ex, i) => {
                 const detail = [
                   ex.sets != null && ex.reps != null
                     ? `${ex.sets}×${ex.reps}`

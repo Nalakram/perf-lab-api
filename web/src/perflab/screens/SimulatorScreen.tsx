@@ -12,8 +12,9 @@ import { useAuth } from "@/auth/useAuth";
 import { usePerfLab, TRAINING_GOALS } from "../store";
 import { Card, Pill, ScreenHeader, SectionLabel, Tile } from "../ui";
 import { Chart, Area, Line, Marker, useVizTheme } from "../viz";
-import { COLORS, readinessColor, readinessWord } from "../sim";
-import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
+import { COLORS, readinessColor, readinessWord } from "../readinessPresentation";
+import { useAuthedResource } from "../useAuthedResource";
+import { assertNever, type AuthedResource } from "../resource";
 import {
   placeholderProjection,
   dominantAxes,
@@ -32,6 +33,63 @@ const fmtDelta = (n: number) => `${n >= 0 ? "+" : "−"}${Math.abs(Math.round(n)
 const fmtPct = (n: number) => `${n >= 0 ? "+" : "−"}${Math.abs(Math.round(n * 100))}%`;
 const relGain = (a: ProjectionAxis) => (a.baseline > 0 ? (a.projected - a.baseline) / a.baseline : 0);
 
+// ─── SINGLE PROJECTION SOURCE ────────────────────────────────────────────────
+// This screen always renders a complete projection, so it can never branch away
+// to a notice card the way <ResourceState> surfaces do. It therefore consumes
+// the canonical resource contract through the other sanctioned pattern: one
+// exhaustive switch that turns the union into everything the body needs to say.
+//
+//   guest    → the deterministic local placeholder, labelled as preview data
+//              (a guest seeing a working, clearly-labelled simulation is the
+//              settled design here — it is a simulator, not a data readout)
+//   loading  → the placeholder while the first real projection is in flight
+//   error    → the placeholder, plus a plain note that the service was unreachable
+//   success  → the real projection; a refresh keeps it on screen underneath
+interface ProjectionView {
+  /** The projection actually rendered: the athlete's when there is one, else the local one. */
+  proj: ProjectionResponse;
+  /** Signed out — every figure on screen is illustrative and must say so. */
+  preview: boolean;
+  /** A projection request is in flight for a signed-in athlete. */
+  projecting: boolean;
+  /** No usable projection at all: the failure to show beside the illustrative estimate. */
+  unreachable: string | null;
+}
+
+function projectionView(
+  resource: AuthedResource<ProjectionResponse>,
+  placeholder: ProjectionResponse,
+): ProjectionView {
+  switch (resource.status) {
+    case "guest":
+      return { proj: placeholder, preview: true, projecting: false, unreachable: null };
+
+    case "loading":
+      return { proj: placeholder, preview: false, projecting: true, unreachable: null };
+
+    case "error":
+      return {
+        proj: placeholder,
+        preview: false,
+        projecting: false,
+        unreachable: resource.error.message,
+      };
+
+    case "success":
+      // A failed refresh is NOT `unreachable` — the previous projection is still
+      // the athlete's own, so it stays on screen rather than being disowned.
+      return {
+        proj: resource.data,
+        preview: false,
+        projecting: resource.refresh.status === "loading",
+        unreachable: null,
+      };
+
+    default:
+      return assertNever(resource);
+  }
+}
+
 export function SimulatorScreen() {
   const { state, actions } = usePerfLab();
   const auth = useAuth();
@@ -49,11 +107,9 @@ export function SimulatorScreen() {
     }
   }, [auth.profile, sim.goal, actions]);
 
-  // ─── SINGLE PROJECTION SOURCE ──────────────────────────────────────────────
   // Signed in → project against the seeded twin via the real endpoint. Guest /
-  // signed out → the deterministic local placeholder (the "preview data" pill).
-  // The placeholder is also the graceful fallback while the first fetch is in
-  // flight (so we never flash an empty screen) and if the fetch errors.
+  // signed out → the deterministic local placeholder. See `projectionView` above
+  // for how each state of that one resource is spoken to the athlete.
   const placeholder: ProjectionResponse = placeholderProjection({
     goal: sim.goal,
     weeks: sim.weeks,
@@ -61,11 +117,7 @@ export function SimulatorScreen() {
     intensity: sim.intensity,
     recovery: sim.recovery,
   });
-  const {
-    data: fetched,
-    loading: projLoading,
-    error: projError,
-  } = useAuthedResource(
+  const projection = useAuthedResource<ProjectionResponse>(
     (t) =>
       api.getSimulateProjection(
         {
@@ -79,12 +131,11 @@ export function SimulatorScreen() {
       ),
     [sim.goal, sim.weeks, sim.volume, sim.intensity, sim.recovery],
   );
-  // `fetched` persists across control-change refetches (the hook only clears it
-  // on error), so `?? placeholder` keeps the last real projection during a
-  // refetch and swaps to the local one only before the first result or on error.
-  const proj: ProjectionResponse = fetched ?? placeholder;
-  const usingFallback = !!auth.token && !fetched; // signed in but on placeholder
-  // ───────────────────────────────────────────────────────────────────────────
+  // A control change refetches over an existing projection, which stays `success`
+  // — so the athlete's last real projection holds the screen through the refetch,
+  // and the local one appears only before any result or when there is none.
+  const view = projectionView(projection, placeholder);
+  const proj = view.proj;
 
   const weeks = proj.weeks;
   const axes = proj.axes;
@@ -125,8 +176,8 @@ export function SimulatorScreen() {
         badge={<Pill>what-if · X(t) projection</Pill>}
         subtitle="Run your digital twin forward against a goal. Shape the plan on the left and watch all eight capacity axes, readiness and fatigue respond — measured against simply maintaining."
       >
-        {!auth.token && <Pill className="border-white/15 bg-white/[0.06] text-mute">preview data</Pill>}
-        {auth.token && projLoading && (
+        {view.preview && <Pill className="border-white/15 bg-white/[0.06] text-mute">preview data</Pill>}
+        {view.projecting && (
           <Pill className="border-ac/25 bg-ac/[0.08] text-ac">projecting…</Pill>
         )}
       </ScreenHeader>
@@ -307,15 +358,15 @@ export function SimulatorScreen() {
             <div className="text-[13.5px] font-medium leading-[1.6] text-soft">{narr}</div>
           </Card>
 
-          {!auth.token && (
+          {view.preview && (
             <Card hover={false} className="px-5 py-[14px]">
               <div className="text-[12.5px] font-medium leading-[1.5] text-mute">Sign in to project against your seeded twin — the figures above are illustrative preview data.</div>
             </Card>
           )}
 
-          {usingFallback && projError && (
+          {view.unreachable && (
             <Card hover={false} className="px-5 py-[14px]">
-              <div className="text-[12.5px] font-medium leading-[1.5] text-[#b98a6a]">Couldn't reach the projection service ({projError}). Showing an illustrative estimate — adjust a control to retry.</div>
+              <div className="text-[12.5px] font-medium leading-[1.5] text-[#b98a6a]">Couldn't reach the projection service ({view.unreachable}). Showing an illustrative estimate — adjust a control to retry.</div>
             </Card>
           )}
         </div>

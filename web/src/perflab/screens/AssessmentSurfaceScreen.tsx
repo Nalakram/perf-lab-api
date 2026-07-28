@@ -12,9 +12,12 @@ import {
   submitBenchmarkObservation,
 } from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
-import type { AssessmentBenchmarkCard, ApiError } from "@/types";
+import type { AssessmentBenchmarkCard, ApiError, OnboardingStateResponse } from "@/types";
 import { Card, Pill, ScreenHeader, SectionLabel } from "../ui";
-import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
+import { ResourceState } from "../ResourceState";
+import { assertNever, resourceData } from "../resource";
+import { usePerfLab } from "../store";
+import { useAuthedResource } from "../useAuthedResource";
 
 type Mode = "onramp" | "retest";
 
@@ -29,6 +32,7 @@ const CONF: Record<string, { label: string; cls: string }> = {
 
 export function AssessmentSurfaceScreen() {
   const { token } = useAuth();
+  const { actions } = usePerfLab();
   const [mode, setMode] = useState<Mode>("onramp");
   const [refreshKey, setRefreshKey] = useState(0);
   const surface = useAuthedResource(
@@ -36,7 +40,11 @@ export function AssessmentSurfaceScreen() {
     [mode, refreshKey],
   );
 
-  const recommended = new Set(surface.data?.recommended ?? []);
+  // The mode row sits ABOVE the state-dependent body and shows the focus chip
+  // whenever a payload is on screen, so it reads the union directly rather than
+  // through the branch. `resourceData` narrows to a real payload or null — it
+  // never invents a fallback catalog.
+  const loaded = resourceData(surface);
 
   return (
     <section className="flex flex-col gap-[18px] px-[30px] pb-9 pt-[26px]">
@@ -62,54 +70,75 @@ export function AssessmentSurfaceScreen() {
             {m === "onramp" ? "Onramp" : "Retest"}
           </button>
         ))}
-        {surface.data && surface.data.active_domains.length > 0 && (
+        {loaded && loaded.active_domains.length > 0 && (
           <span className="ml-2 text-[11.5px] font-medium leading-none text-dim">
-            focused on {surface.data.active_domains.join(", ")}
+            focused on {loaded.active_domains.join(", ")}
           </span>
         )}
       </div>
 
-      {surface.loading ? (
-        <PlaceholderBox>Loading your assessment surface…</PlaceholderBox>
-      ) : surface.error ? (
-        <PlaceholderBox tone="error">{surface.error}</PlaceholderBox>
-      ) : !surface.data || surface.data.groups.length === 0 ? (
-        <PlaceholderBox>
-          No benchmarks match your domains yet. Add an objective or goal to focus the
-          catalog, or switch to Retest.
-        </PlaceholderBox>
-      ) : (
-        <div className="flex flex-col gap-[22px]">
-          {surface.data.groups.map((group) => (
-            <div key={group.domain} className="flex flex-col gap-3">
-              <SectionLabel className="capitalize">{group.domain}</SectionLabel>
-              <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
-                {group.cards.map((card) => (
-                  <BenchmarkCard
-                    key={card.code}
-                    card={card}
-                    mode={mode}
-                    recommended={recommended.has(card.code)}
-                    token={token}
-                    onSubmitted={() => setRefreshKey((k) => k + 1)}
-                  />
-                ))}
-              </div>
+      {/*
+        The body is placeholder-box shaped in every non-success state, which is
+        exactly the `box` variant of the shared boundary — the local
+        PlaceholderBox was a duplicate of it and is gone. The screen no longer
+        picks the branch, so the two states the old `!data` test collapsed are
+        now distinct: a signed-out visitor is told to sign in instead of being
+        told their own catalog is empty.
+      */}
+      <ResourceState
+        resource={surface}
+        isEmpty={(s) => s.groups.length === 0}
+        guest={{
+          body: "Sign in to see which benchmarks are worth assessing next — the catalog is filtered by your domains and ranked by measurement debt.",
+          action: { label: "Sign in →", onClick: actions.openAuth },
+        }}
+        loadingContent={{ body: "Loading your assessment surface…" }}
+        empty={{
+          body: "No benchmarks match your domains yet. Add an objective or goal to focus the catalog, or switch to Retest.",
+        }}
+        staleLabel="Couldn't refresh your assessment surface — showing your last loaded benchmarks."
+      >
+        {(data) => {
+          const recommended = new Set(data.recommended);
+          return (
+            <div className="flex flex-col gap-[22px]">
+              {data.groups.map((group) => (
+                <div key={group.domain} className="flex flex-col gap-3">
+                  <SectionLabel className="capitalize">{group.domain}</SectionLabel>
+                  <div className="grid grid-cols-1 gap-3 lg:grid-cols-2">
+                    {group.cards.map((card) => (
+                      <BenchmarkCard
+                        key={card.code}
+                        card={card}
+                        mode={mode}
+                        recommended={recommended.has(card.code)}
+                        token={token}
+                        onSubmitted={() => setRefreshKey((k) => k + 1)}
+                      />
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
-      )}
+          );
+        }}
+      </ResourceState>
     </section>
   );
 }
 
+// The banner reports on onboarding state, so it has nothing honest to say until
+// one has actually loaded: no token, no first payload yet, and a failed load all
+// render nothing — as before, but now as four named states rather than one
+// collapsed `data === null`. There is no notice to show in those states, so this
+// surface is not card-shaped and takes the exhaustive-switch consumer instead of
+// <ResourceState>. A refresh — including a failed one — keeps the banner on
+// screen, because the resource stays `success`.
 function OnboardingBanner() {
   const { token } = useAuth();
   const [refreshKey, setRefreshKey] = useState(0);
   const [busy, setBusy] = useState(false);
   const state = useAuthedResource((t) => getOnboardingState(t), [refreshKey]);
-  const s = state.data;
-  if (!s) return null;
 
   async function leave() {
     if (!token) return;
@@ -122,6 +151,27 @@ function OnboardingBanner() {
     }
   }
 
+  switch (state.status) {
+    case "guest":
+    case "loading":
+    case "error":
+      return null;
+    case "success":
+      return <OnboardingBannerCard s={state.data} busy={busy} onLeave={leave} />;
+    default:
+      return assertNever(state);
+  }
+}
+
+function OnboardingBannerCard({
+  s,
+  busy,
+  onLeave,
+}: {
+  s: OnboardingStateResponse;
+  busy: boolean;
+  onLeave: () => void;
+}) {
   const twin = s.twin;
   const done = s.status === "completed";
 
@@ -143,7 +193,7 @@ function OnboardingBanner() {
         </div>
         {!done && (
           <button
-            onClick={leave}
+            onClick={onLeave}
             disabled={busy}
             className="rounded-[9px] border border-white/10 bg-white/[0.04] px-4 py-2 text-[12px] font-semibold leading-none text-soft disabled:opacity-60"
           >
@@ -276,23 +326,5 @@ function BenchmarkCard({
         </button>
       )}
     </Card>
-  );
-}
-
-function PlaceholderBox({
-  children,
-  tone = "empty",
-}: {
-  children: React.ReactNode;
-  tone?: "empty" | "error";
-}) {
-  const cls =
-    tone === "error"
-      ? "border-hot/[0.3] bg-hot/[0.05] text-mute"
-      : "border-dashed border-white/10 text-mute";
-  return (
-    <div className={`flex min-h-[240px] flex-col items-center justify-center gap-3 rounded-[18px] border p-[30px] text-center ${cls}`}>
-      <div className="max-w-[360px] text-[12.5px] font-medium leading-[1.5]">{children}</div>
-    </div>
   );
 }

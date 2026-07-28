@@ -85,48 +85,8 @@ export function useAuthedResource<T>(
   return state;
 }
 
-// ---------------------------------------------------------------------------
-// MIGRATION SHIM — delete before the web PR opens.
-//
-// The B3 sweep migrates all 25 call sites to `useAuthedResource`; until a given
-// file is converted it uses this adapter so every intermediate commit still
-// type-checks and builds. `tests/resource-migration.test.ts` fails once the last
-// caller is gone, which is the signal to delete this block.
-//
-// Note it is already strictly honester than the hook it replaces: a failed
-// refresh keeps the previous payload instead of nulling it, so a legacy caller
-// can no longer fall through `?? sim` on a refresh failure.
-// ---------------------------------------------------------------------------
-
-/** @deprecated Legacy `{data, loading, error}` shape. Migrate to AuthedResource. */
-export interface Resource<T> {
-  data: T | null;
-  loading: boolean;
-  error: string | null;
-}
-
-/** @deprecated Migration adapter — see the note above. */
-export function toLegacyResource<T>(resource: AuthedResource<T>): Resource<T> {
-  switch (resource.status) {
-    case "guest":
-      return { data: null, loading: false, error: null };
-    case "loading":
-      return { data: null, loading: true, error: null };
-    case "error":
-      return { data: null, loading: false, error: resource.error.message };
-    case "success":
-      return {
-        data: resource.data,
-        loading: resource.refresh.status === "loading",
-        error: resource.refresh.status === "error" ? resource.refresh.error.message : null,
-      };
-  }
-}
-
-/** @deprecated Drop-in for unmigrated call sites. Use `useAuthedResource`. */
-export function useLegacyAuthedResource<T>(
-  fetcher: (token: string) => Promise<T>,
-  deps: unknown[] = [],
-): Resource<T> {
-  return toLegacyResource(useAuthedResource(fetcher, deps));
-}
+// The B3 migration shim that used to live here is GONE. It existed so that
+// intermediate commits still built while the 25 call sites moved onto the
+// canonical contract; every consumer has now migrated, and the ratchet in
+// resourceMigration.test.ts fails if the symbol or its `{data, loading, error}`
+// shape is ever reintroduced.

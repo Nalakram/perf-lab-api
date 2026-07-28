@@ -11,11 +11,64 @@ import { useAuth } from "@/auth/useAuth";
 import { createMacrocycle, listObjectives } from "@/api/perfLabClient";
 import type { ApiError, MacrocycleCreate, ObjectiveRead } from "@/types";
 import { usePerfLab } from "../store";
-import { useLegacyAuthedResource as useAuthedResource } from "../useAuthedResource";
+import { useAuthedResource } from "../useAuthedResource";
+import { assertNever, type AuthedResource } from "../resource";
 import { sortObjectives } from "../objectives";
 import { CloseBtn } from "./LogWorkoutModal";
 
 const inputCls = "mt-2 w-full rounded-[11px] border border-white/10 bg-panel px-[13px] py-[11px] text-[14px] text-ink";
+
+/**
+ * What the anchor-objective `<select>` shows for one resource state. This is the
+ * non-card sanctioned consumer of the resource contract — a `<select>` cannot
+ * host a <ResourceState> notice, so the branch is taken here, exhaustively.
+ */
+interface ObjectivePickerView {
+  /** Objectives offered as anchors. Empty whenever no set is known.  */
+  options: ObjectiveRead[];
+  /** Label of the leading blank option. */
+  placeholder: string;
+  /** True only for a settled successful load that returned nothing to anchor to. */
+  noObjectives: boolean;
+}
+
+function objectivePickerView(resource: AuthedResource<ObjectiveRead[]>): ObjectivePickerView {
+  switch (resource.status) {
+    case "guest":
+      // Unreachable in practice — the modal is only opened from signed-in
+      // surfaces — but a guest has no known set, so it reads the same as any
+      // other "nothing to offer yet": an empty, enabled picker, never the
+      // "no active objectives" claim, which would assert something about an
+      // athlete we never asked the backend about.
+      return { options: [], placeholder: "Select an objective…", noObjectives: false };
+
+    case "loading":
+      return { options: [], placeholder: "Loading objectives…", noObjectives: false };
+
+    case "error":
+      // A failed load must not read as "you have no objectives".
+      return { options: [], placeholder: "Select an objective…", noObjectives: false };
+
+    case "success": {
+      const options = sortObjectives(resource.data);
+      const refreshing = resource.refresh.status === "loading";
+      return {
+        options,
+        placeholder: refreshing
+          ? "Loading objectives…"
+          : options.length === 0
+            ? "No active objectives"
+            : "Select an objective…",
+        // Only a settled result may disable the picker: mid-refresh, the set on
+        // screen is still the last good one.
+        noObjectives: !refreshing && options.length === 0,
+      };
+    }
+
+    default:
+      return assertNever(resource);
+  }
+}
 
 export function MacrocycleCreateModal() {
   const { state, actions } = usePerfLab();
@@ -27,14 +80,14 @@ export function MacrocycleCreateModal() {
 
   // Anchor-objective picker: only the athlete's active objectives can anchor a
   // new program. Re-fetches when the objectives list changes.
-  const { data: objectives, loading } = useAuthedResource<ObjectiveRead[]>(
+  const objectivesResource = useAuthedResource<ObjectiveRead[]>(
     (t) => listObjectives(t, "active"),
     [state.objectivesRefreshKey, state.macrocycleCreateOpen],
   );
 
   if (!state.macrocycleCreateOpen) return null;
 
-  const options = objectives ? sortObjectives(objectives) : [];
+  const { options, placeholder, noObjectives } = objectivePickerView(objectivesResource);
   const idValid = objectiveId.trim() !== "" && !Number.isNaN(Number(objectiveId));
 
   // Submit → POST /v1/macrocycles (auth required); on success, bump the refresh
@@ -71,8 +124,6 @@ export function MacrocycleCreateModal() {
     }
   }
 
-  const noObjectives = !loading && objectives !== null && options.length === 0;
-
   return (
     <div className="fixed inset-0 z-[64] flex items-center justify-center p-8 backdrop-blur-[4px]" style={{ background: "rgba(4,5,8,.7)" }}>
       <div className="max-h-[92vh] w-[560px] max-w-full overflow-auto rounded-[18px] border border-white/[0.09] bg-surface shadow-[0_50px_110px_-30px_rgba(0,0,0,.75)]">
@@ -94,7 +145,7 @@ export function MacrocycleCreateModal() {
               className={inputCls}
               style={{ colorScheme: "dark" }}
             >
-              <option value="">{loading ? "Loading objectives…" : noObjectives ? "No active objectives" : "Select an objective…"}</option>
+              <option value="">{placeholder}</option>
               {options.map((o) => (
                 <option key={o.id} value={String(o.id)}>{o.label}</option>
               ))}
