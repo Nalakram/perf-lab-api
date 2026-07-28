@@ -1,0 +1,1742 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Architecture review &mdash; perf-lab-api</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=Public+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;600;700&display=swap" rel="stylesheet">
+<script type="module">
+import mermaid from "https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs";
+/* mermaid-safe.js — data-driven, sanitized Mermaid rendering for the
+ * architecture review report (improve-codebase-architecture).
+ *
+ * Why this exists: candidate names come from real codebases and contain
+ * slashes, parens, colons, arrows (`->`, `→`), brackets, quotes, `#`,
+ * backticks, backslashes, markdown, emoji, and reserved words like `end`.
+ * Hand-written Mermaid source turns any one of those into a syntax error that
+ * replaces the whole page with a red splash. These helpers make that
+ * impossible by construction:
+ *
+ *   - node ids are synthetic (`n0`, `n1`, …) — never derived from names
+ *   - every label is escaped and quoted            (escapeLabel)
+ *   - diagrams are declared as {direction, nodes, edges} data (buildFlowchart)
+ *   - rendering is validated (mermaid.parse) and isolated per diagram, with a
+ *     readable text fallback                       (renderInto / renderAllGraphs)
+ *
+ * This file is deliberately export-free (a classic script):
+ *   - the report inlines the body verbatim into its <script type="module">
+ *     (the report lives in $TMPDIR and cannot reference this file at view time);
+ *   - the regression fixture (mermaid-safe.test.html) loads it with a plain
+ *     <script src="./mermaid-safe.js"> so it works when opened from file://
+ *     (browsers block *module* imports from file://, but allow classic scripts).
+ * The functions are also attached to globalThis.MermaidSafe so both consumers
+ * see one API: { escapeLabel, nodeId, buildFlowchart, renderInto, renderAllGraphs }.
+ */
+
+"use strict";
+
+/** Max label length in code points before truncation with an ellipsis. */
+const MERMAID_SAFE_MAX_LABEL = 60;
+
+/* Reserved-role styling, baked as literal hexes so classDef always parses.
+ * `--critical` (#d03b3b) is theme-invariant by design; the deep fill matches
+ * the light `--deep-fill` and stays legible on both surfaces. A report may
+ * refine per-theme via CSS, e.g.:
+ *   [data-graph] .deep rect { fill: var(--deep-fill) !important; }
+ */
+const MERMAID_SAFE_CLASSDEFS = {
+  deep: "classDef deep fill:#2c2c2a,stroke:#0b0b0b,stroke-width:2px,color:#ffffff",
+  leak: "classDef leak stroke:#d03b3b,stroke-width:2px",
+};
+
+let mermaidSafeUid = 0;
+
+/**
+ * Escape a human name into a Mermaid-safe quoted-label payload.
+ * Collapses whitespace, truncates overlong names (code-point safe, so emoji
+ * never split into lone surrogates), and replaces the characters Mermaid
+ * chokes on with Mermaid entity codes. The result is meant to be wrapped in
+ * quotes by the builder — inside a quoted label, slashes, parentheses,
+ * colons, arrows, brackets, pipes, semicolons, and markdown all pass through
+ * safely; the entity codes cover the six characters that are unsafe even
+ * inside quotes.
+ */
+function escapeLabel(name) {
+  let s = String(name == null ? "" : name).replace(/\s+/g, " ").trim();
+  if (!s) return "(unnamed)";
+  const points = Array.from(s); // code points, not UTF-16 units
+  if (points.length > MERMAID_SAFE_MAX_LABEL) {
+    s = points.slice(0, MERMAID_SAFE_MAX_LABEL - 1).join("").trimEnd() + "…";
+  }
+  // `#` must be escaped FIRST: every other escape *introduces* `#`, so
+  // escaping `#` later would corrupt them (e.g. `#quot;` → `#35;quot;`).
+  return s
+    .replace(/#/g, "#35;")
+    .replace(/&/g, "#amp;")
+    .replace(/"/g, "#quot;")
+    .replace(/</g, "#lt;")
+    .replace(/>/g, "#gt;")
+    // A raw backtick makes Mermaid v11 treat the label as a *markdown string*
+    // and reject it — this escape is load-bearing, not cosmetic.
+    .replace(/`/g, "#96;");
+}
+
+/** Synthetic node id — names never touch identifiers, so a name can never
+ * produce an invalid id, an id collision, or the reserved word `end`. */
+function nodeId(i) {
+  return "n" + i;
+}
+
+/* internal: identity is never colour-alone — make sure the role word rides
+ * the label unless the name already carries it. */
+function mermaidSafeWithRoleWord(label, role) {
+  return new RegExp("\\b" + role + "\\b", "i").test(label)
+    ? label
+    : label + " · " + role;
+}
+
+/**
+ * Build flowchart source from data: { direction, nodes, edges }.
+ *   direction    "LR" (default) | "RL" | "TD" | "TB" | "BT" — anything else → "LR"
+ *   nodes[i]     { name, role?: "deep"|"leak", shape?: "round"|"stadium" }
+ *   edges[j]     { from, to, label?, kind?: "solid"|"dotted"|"thick", role?: "leak" }
+ * Edges referencing a missing or non-integer index are dropped — never
+ * emitted as broken source. Leak edges are force-labelled "leak" (the
+ * non-colour channel is not optional) and get the critical linkStyle.
+ */
+function buildFlowchart(graph) {
+  const g = graph && typeof graph === "object" ? graph : {};
+  const DIRECTIONS = ["LR", "RL", "TD", "TB", "BT"];
+  const dirRaw = String(g.direction || "").toUpperCase();
+  const direction = DIRECTIONS.indexOf(dirRaw) >= 0 ? dirRaw : "LR";
+  const nodes = Array.isArray(g.nodes) ? g.nodes : [];
+  const edges = Array.isArray(g.edges) ? g.edges : [];
+
+  const lines = ["flowchart " + direction];
+  const rolesUsed = new Set();
+
+  nodes.forEach((node, i) => {
+    const id = nodeId(i);
+    let label = escapeLabel(node && node.name);
+    const role =
+      node && (node.role === "deep" || node.role === "leak") ? node.role : null;
+    if (role) {
+      label = mermaidSafeWithRoleWord(label, role);
+      rolesUsed.add(role);
+    }
+    let open = '["';
+    let close = '"]';
+    if (node && node.shape === "round") { open = '("'; close = '")'; }
+    else if (node && node.shape === "stadium") { open = '(["'; close = '"])'; }
+    lines.push("  " + id + open + label + close);
+    if (role) lines.push("  class " + id + " " + role);
+  });
+
+  const linkStyles = [];
+  let linkIndex = 0; // linkStyle indexes count emitted edges only
+  edges.forEach((edge) => {
+    if (!edge) return;
+    const from = edge.from;
+    const to = edge.to;
+    if (!Number.isInteger(from) || !Number.isInteger(to)) return;
+    if (from < 0 || from >= nodes.length || to < 0 || to >= nodes.length) return;
+
+    let label =
+      edge.label == null || String(edge.label).trim() === ""
+        ? null
+        : escapeLabel(edge.label);
+    if (edge.role === "leak") {
+      label = label ? mermaidSafeWithRoleWord(label, "leak") : "leak";
+      linkStyles.push(
+        "  linkStyle " + linkIndex + " stroke:#d03b3b,stroke-width:2px"
+      );
+    }
+
+    let arrow;
+    if (edge.kind === "dotted") arrow = label ? '-. "' + label + '" .->' : "-.->";
+    else if (edge.kind === "thick") arrow = label ? '== "' + label + '" ==>' : "==>";
+    else arrow = label ? '-- "' + label + '" -->' : "-->";
+
+    lines.push("  " + nodeId(from) + " " + arrow + " " + nodeId(to));
+    linkIndex++;
+  });
+
+  rolesUsed.forEach((role) => lines.push("  " + MERMAID_SAFE_CLASSDEFS[role]));
+  lines.push(...linkStyles);
+  return lines.join("\n");
+}
+
+/* internal: readable text fallback — the graceful-degradation path. Names go
+ * in via textContent (data, never markup), so a hostile name can't inject. */
+function mermaidSafeFallback(el, graph, reason, source) {
+  const lines = [];
+  if (graph && typeof graph === "object" && Array.isArray(graph.nodes)) {
+    const nodes = graph.nodes;
+    const plain = (i) => {
+      const n = nodes[i];
+      const s =
+        n && n.name != null ? String(n.name).replace(/\s+/g, " ").trim() : "";
+      return s || "node " + i;
+    };
+    const inEdge = new Set();
+    (Array.isArray(graph.edges) ? graph.edges : []).forEach((e) => {
+      if (!e || !Number.isInteger(e.from) || !Number.isInteger(e.to)) return;
+      if (e.from < 0 || e.from >= nodes.length || e.to < 0 || e.to >= nodes.length) return;
+      inEdge.add(e.from);
+      inEdge.add(e.to);
+      const lab =
+        e.label != null && String(e.label).trim() !== ""
+          ? "  (" + String(e.label).replace(/\s+/g, " ").trim() + ")"
+          : "";
+      lines.push(plain(e.from) + " → " + plain(e.to) + lab);
+    });
+    nodes.forEach((n, i) => {
+      if (!inEdge.has(i)) lines.push(plain(i));
+    });
+  }
+  if (lines.length === 0) lines.push("(diagram unavailable)");
+
+  el.textContent = "";
+  const box = document.createElement("div");
+  box.className = "mermaid-fallback";
+  box.setAttribute("role", "img");
+  box.setAttribute("aria-label", "Diagram fallback: " + lines.join("; "));
+  box.style.cssText =
+    "border:1px dashed var(--baseline,#c3c2b7);border-radius:8px;padding:12px;" +
+    "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;font-size:12px;" +
+    "color:var(--ink-secondary,#52514e);";
+
+  const head = document.createElement("div");
+  head.className = "mermaid-fallback-title";
+  head.textContent = "diagram unavailable — text fallback";
+  head.style.cssText =
+    "text-transform:uppercase;letter-spacing:.08em;font-size:10px;" +
+    "color:var(--ink-muted,#898781);margin-bottom:6px;";
+
+  const pre = document.createElement("pre");
+  pre.textContent = lines.join("\n");
+  pre.style.cssText = "margin:0;white-space:pre-wrap;";
+
+  box.appendChild(head);
+  box.appendChild(pre);
+  el.appendChild(box);
+  return { ok: false, mode: "fallback", reason: reason || "", source: source || "", el };
+}
+
+/**
+ * Render one graph (the {direction, nodes, edges} data) into `el` using the
+ * given mermaid instance. Validates with mermaid.parse and renders inside a
+ * try/catch; on any failure the container gets a readable `.mermaid-fallback`
+ * instead — it never blanks the page or leaks a syntax error.
+ * Resolves to { ok, mode: "svg"|"fallback", source, el, reason? }.
+ */
+async function renderInto(el, graph, mermaid) {
+  let source = "";
+  const id = "mermaid-safe-" + mermaidSafeUid++;
+  try {
+    source = buildFlowchart(graph);
+    await mermaid.parse(source); // throws on invalid source
+    const out = await mermaid.render(id, source);
+    el.textContent = "";
+    el.innerHTML = out.svg; // mermaid output from sanitized source
+    if (typeof out.bindFunctions === "function") out.bindFunctions(el);
+    el.classList.add("mermaid-rendered");
+    return { ok: true, mode: "svg", source, el };
+  } catch (error) {
+    // A failed mermaid.render can leave a stray element behind — remove it.
+    ["", "d"].forEach((prefix) => {
+      const stray = document.getElementById(prefix + id);
+      if (stray && !el.contains(stray)) stray.remove();
+    });
+    const reason = (error && error.message) || String(error);
+    return mermaidSafeFallback(el, graph, reason, source);
+  }
+}
+
+/**
+ * Find every container matching `selector` (default "[data-graph]"), parse
+ * its data-graph JSON, and render each one individually — one bad diagram
+ * can never take the others (or the page) down. Malformed JSON degrades to
+ * the same readable fallback. Resolves to an array of renderInto results.
+ */
+async function renderAllGraphs(selector, mermaid, root) {
+  const scope = root || document;
+  const containers = Array.from(
+    scope.querySelectorAll(selector || "[data-graph]")
+  );
+  const results = [];
+  for (const el of containers) {
+    let graph = null;
+    try {
+      graph = JSON.parse(el.getAttribute("data-graph"));
+    } catch (error) {
+      results.push(
+        mermaidSafeFallback(el, null, "invalid data-graph JSON: " + error.message, "")
+      );
+      continue;
+    }
+    results.push(await renderInto(el, graph, mermaid));
+  }
+  return results;
+}
+
+globalThis.MermaidSafe = {
+  escapeLabel,
+  nodeId,
+  buildFlowchart,
+  renderInto,
+  renderAllGraphs,
+};
+
+/* ledger-verify.js — self-verifying scoring ledger for the architecture
+ * review report (improve-codebase-architecture).
+ *
+ * Why this exists: every number on a scored report page — priority, band,
+ * meter fill, histogram bars, the 1..N rank order — is otherwise hand-typed
+ * by the generating model, and nothing catches an arithmetic slip. This
+ * module makes the numbers impossible to hand-mistype, the same way
+ * mermaid-safe.js made diagrams impossible to hand-break:
+ *
+ *   - the report embeds ONE spine-schema ledger as a JSON island
+ *     (a <script type="application/json" id="ledger"> block)
+ *   - every numeric display renders FROM that data (renderLedgerRows,
+ *     renderMeterInto, renderRankInto) — prose stays hand-authored
+ *   - priority_score is RECOMPUTED from the eight sub-scores; a stored
+ *     value that disagrees is flagged, and the computed value is displayed
+ *   - band, fill %, and band-track stops are DERIVED from one bands config,
+ *     so thresholds can never desync from their pixels
+ *   - card order in the DOM is verified against priority order (with the
+ *     deterministic tie-break), and a masthead chip reports the verdict
+ *   - scheduling is verified per the spine's ## Eligibility and stable
+ *     ranking (REPORT-SCORING.md, spine v3): effort domain (S|M|L), status
+ *     domain and stored-vs-derived consistency, depends_on/unlocks references
+ *     (unknown / self / cycles), and an eligible queue (verified.queue) that
+ *     blocked, human-decision, and rejected candidates can never enter
+ *
+ * The island is also the machine handoff: production-flywheel (or the next
+ * run, as a `previous` baseline) reads the same JSON the page rendered from.
+ *
+ * Deliberately export-free (a classic script), for the same reasons as
+ * mermaid-safe.js: the report inlines the body verbatim, and the regression
+ * fixture loads it via <script src> from file://. API attached to
+ * globalThis.LedgerVerify.
+ */
+
+"use strict";
+
+/** The eight spine scores, in display order. Value adds, risk subtracts. */
+const LEDGER_SCORE_KEYS = {
+  value: ["severity", "confidence", "leverage", "locality", "testability"],
+  risk: ["blast_radius", "regression_risk", "human_decision_risk"],
+};
+
+/** Short labels for the contribution histogram, index-aligned with the
+ * arrays above: sev·cnf·lev·loc·tst / bla·reg·hdr. */
+const LEDGER_SCORE_ABBR = {
+  severity: "sev", confidence: "cnf", leverage: "lev", locality: "loc",
+  testability: "tst", blast_radius: "bla", regression_risk: "reg",
+  human_decision_risk: "hdr",
+};
+
+/** One-line definitions (from the spine's scoring half), used for the
+ * visible legend and its hover glosses. */
+const LEDGER_SCORE_DEFS = {
+  severity: "how bad the current issue is",
+  confidence: "how certain the finding is",
+  leverage: "how much improvement a fix likely produces",
+  locality: "how contained the fix appears",
+  testability: "how easy it is to prove the fix",
+  blast_radius: "how many connected surfaces may need coordinated change",
+  regression_risk: "how likely the fix is to break behavior",
+  human_decision_risk: "how likely the fix requires human judgment (public contract, migration, policy, architecture, deletion, numerical correctness)",
+};
+
+/** Spine v3 scheduling domains (REPORT-SCORING.md ## Scheduling fields). */
+const LEDGER_EFFORT_ORDER = { S: 0, M: 1, L: 2 };
+const LEDGER_STATUS_VALUES = ["ready", "blocked", "needs-human-decision", "rejected", "completed"];
+
+/** Rank position of an effort letter; a missing effort ranks as M. */
+function effortRank(effort) {
+  return Object.prototype.hasOwnProperty.call(LEDGER_EFFORT_ORDER, effort)
+    ? LEDGER_EFFORT_ORDER[effort]
+    : LEDGER_EFFORT_ORDER.M;
+}
+
+/** Canonical status derivation (spine ## Scheduling fields). `completed` is
+ * never derived — only the loop that finished the candidate stores it. */
+function deriveStatus(input) {
+  if (input.action === "reject") return "rejected";
+  if (input.judgmentHeavy || input.blockedByOpen) return "needs-human-decision";
+  if (input.unresolvedDeps && input.unresolvedDeps.length) return "blocked";
+  return "ready";
+}
+
+/** Spine range: −10 … +22. Derived, not restated, everywhere below. */
+const LEDGER_RANGE = { min: -10, max: 22 };
+
+/** This report's bands (stamped deviation: Strong ≥13, stricter than the
+ * spine style-half's ≥12). Ordered high→low; `min` is the inclusive floor.
+ * An island may override with its own `bands` array (same shape). */
+const LEDGER_DEFAULT_BANDS = [
+  { key: "strong", icon: "✓", label: "Strong", min: 13, color: "#0ca30c" },
+  { key: "worth", icon: "◐", label: "Worth exploring", min: 6, color: "#fab219" },
+  { key: "speculative", icon: "○", label: "Speculative", min: LEDGER_RANGE.min, color: "#898781" },
+];
+
+/** Position of a priority score on the −10…+22 axis, as a 0–100 percent. */
+function fillPercent(priority) {
+  const span = LEDGER_RANGE.max - LEDGER_RANGE.min;
+  const pct = ((priority - LEDGER_RANGE.min) / span) * 100;
+  return Math.max(0, Math.min(100, pct));
+}
+
+/** priority_score = Σ value − Σ risk. Throws if any score is missing. */
+function computePriority(scores) {
+  let value = 0;
+  let risk = 0;
+  for (const k of LEDGER_SCORE_KEYS.value) value += Number(scores[k]);
+  for (const k of LEDGER_SCORE_KEYS.risk) risk += Number(scores[k]);
+  const priority = value - risk;
+  if (Number.isNaN(priority)) throw new Error("scores incomplete");
+  return { priority, value, risk };
+}
+
+/** Band for a priority under a bands config (default: this report's). */
+function bandFor(priority, bands) {
+  const list = Array.isArray(bands) && bands.length ? bands : LEDGER_DEFAULT_BANDS;
+  for (const b of list) if (priority >= b.min) return b;
+  return list[list.length - 1];
+}
+
+/** Derive the band-track stop percents from the bands config — one source,
+ * so a future cut change can never desync thresholds from pixels. Each stop
+ * sits at the position of the threshold score NAMED in the band labels: the
+ * lowest band's "≤ N" names N (= the mid band's min − 1), every higher cut
+ * "≥ M" names M. For this report's bands that yields 46.9% / 71.9% — the
+ * doc's 47/72 stops, derived instead of restated. */
+function bandStops(bands) {
+  const list = (Array.isArray(bands) && bands.length ? bands : LEDGER_DEFAULT_BANDS)
+    .slice()
+    .sort((a, b) => a.min - b.min);
+  if (list.length < 2) return [];
+  const stops = [fillPercent(list[1].min - 1)];
+  for (let i = 2; i < list.length; i++) stops.push(fillPercent(list[i].min));
+  return stops; // ascending percents, one per interior boundary
+}
+
+/** The spine's stable comparator (REPORT-SCORING.md ## Eligibility and
+ * stable ranking): priority desc, then effort asc (S < M < L), then severity
+ * desc, then confidence desc, then candidate_id ascending. Ties can never
+ * reshuffle between runs, so `1..N` stays a stable selection handle. */
+function tieBreakCompare(a, b) {
+  if (b.computed.priority !== a.computed.priority) return b.computed.priority - a.computed.priority;
+  const ea = effortRank(a.effort);
+  const eb = effortRank(b.effort);
+  if (ea !== eb) return ea - eb; // cheap work first among equals: S < M < L (spine v3)
+  if (Number(b.scores.severity) !== Number(a.scores.severity)) return Number(b.scores.severity) - Number(a.scores.severity);
+  if (Number(b.scores.confidence) !== Number(a.scores.confidence)) return Number(b.scores.confidence) - Number(a.scores.confidence);
+  return String(a.candidate_id) < String(b.candidate_id) ? -1 : 1;
+}
+
+/**
+ * Verify a parsed ledger against the spine's scoring half and its
+ * ## Eligibility and stable ranking. Returns { ok, problems[], candidates[],
+ * queue[] } where candidates are normalized — computed priority/band/fill/
+ * rank/status/eligible attached — and sorted by the stable comparator, and
+ * queue is the eligible candidate_ids in that order. opts.humanOrder (an
+ * array of ids) reorders the queue among eligible candidates only; listed
+ * ids that are ineligible or unknown land in humanOrderSkipped, never in
+ * the queue. Stored rollup.priority_score and status are checked, never
+ * trusted for display.
+ */
+function verifyLedger(ledger, opts) {
+  const problems = [];
+  const push = (code, candidateId, message) =>
+    problems.push({ code, candidate_id: candidateId || null, message });
+
+  if (!ledger || typeof ledger !== "object" || !Array.isArray(ledger.candidates)) {
+    push("ledger-shape", null, "ledger is not an object with a candidates array");
+    return { ok: false, problems, candidates: [], queue: [], humanOrderSkipped: [], bands: LEDGER_DEFAULT_BANDS, stops: bandStops() };
+  }
+  const bands = (opts && opts.bands) || ledger.bands || LEDGER_DEFAULT_BANDS;
+
+  const seen = new Set();
+  const normalized = [];
+  ledger.candidates.forEach((c, i) => {
+    const id = c && c.candidate_id != null ? String(c.candidate_id) : "";
+    const ref = id || "candidate[" + i + "]";
+    if (!id) push("missing-field", ref, ref + ": missing candidate_id");
+    if (id && seen.has(id)) push("dup-id", id, "duplicate candidate_id: " + id);
+    seen.add(id);
+    if (!c || typeof c.title !== "string" || !c.title.trim())
+      push("missing-field", ref, ref + ": missing title");
+
+    // scores: all eight present, integers 1–5
+    const scores = (c && c.scores) || {};
+    let scoresOk = true;
+    for (const k of [...LEDGER_SCORE_KEYS.value, ...LEDGER_SCORE_KEYS.risk]) {
+      const v = scores[k];
+      if (!Number.isInteger(v) || v < 1 || v > 5) {
+        push("score-range", ref, ref + ": scores." + k + " must be an integer 1–5 (got " + JSON.stringify(v) + ")");
+        scoresOk = false;
+      }
+    }
+
+    // evidence rule: file evidence, or explicit architecture-level rationale
+    const ev = c && c.evidence;
+    if (!Array.isArray(ev) || ev.length === 0) {
+      push("evidence-missing", ref, ref + ": evidence is required (file/line, or architecture_level with rationale)");
+    } else {
+      ev.forEach((e, j) => {
+        const ok =
+          (e && typeof e.file === "string" && e.file.trim() &&
+            typeof e.observation === "string" && e.observation.trim() &&
+            (e.line == null || (Number.isInteger(e.line) && e.line >= 1))) ||
+          (e && e.architecture_level === true &&
+            typeof e.rationale === "string" && e.rationale.trim());
+        if (!ok) push("evidence-shape", ref, ref + ": evidence[" + j + "] needs {file, observation, line?} or {architecture_level: true, rationale}");
+      });
+    }
+
+    const effortValid = c && c.effort != null &&
+      Object.prototype.hasOwnProperty.call(LEDGER_EFFORT_ORDER, c.effort);
+    if (c && c.effort != null && !effortValid)
+      push("effort-range", ref, ref + ": effort must be one of S | M | L when present (got " + JSON.stringify(c.effort) + ")");
+
+    const statusStored = c && c.status != null ? String(c.status) : null;
+    if (statusStored != null && LEDGER_STATUS_VALUES.indexOf(statusStored) < 0)
+      push("status-invalid", ref, ref + ": status must be one of " + LEDGER_STATUS_VALUES.join(" | ") + " when present (got " + JSON.stringify(c.status) + ")");
+
+    if (!scoresOk) return; // can't compute a priority worth showing
+
+    const computed = computePriority(scores);
+    const stored = c.rollup && c.rollup.priority_score;
+    if (stored != null && Number(stored) !== computed.priority) {
+      push("priority-mismatch", ref,
+        ref + ": stored priority_score " + stored + " ≠ recomputed " + computed.priority + " — displaying the recomputed value");
+    }
+    normalized.push({
+      candidate_id: id || ref,
+      title: c.title || ref,
+      scores,
+      rollup: c.rollup || {},
+      evidence: Array.isArray(ev) ? ev : [],
+      computed,
+      band: bandFor(computed.priority, bands),
+      fillPct: fillPercent(computed.priority),
+      effort: effortValid ? c.effort : null,
+      statusStored: statusStored != null && LEDGER_STATUS_VALUES.indexOf(statusStored) >= 0 ? statusStored : null,
+      statusInvalid: statusStored != null && LEDGER_STATUS_VALUES.indexOf(statusStored) < 0,
+      depends_on: c && Array.isArray(c.depends_on) ? c.depends_on.map(String) : null,
+      unlocks: c && Array.isArray(c.unlocks) ? c.unlocks.map(String) : null,
+      judgmentHeavy: Number(scores.human_decision_risk) >= 4,
+    });
+  });
+
+  normalized.sort(tieBreakCompare);
+  normalized.forEach((c, i) => { c.rank = i + 1; });
+
+  // spine v3 scheduling — the executable form of REPORT-SCORING.md
+  // ## Eligibility and stable ranking: refs, cycles, status, queue.
+  const byId = new Map(normalized.map((c) => [c.candidate_id, c]));
+  for (const c of normalized) {
+    for (const field of ["depends_on", "unlocks"]) {
+      const arr = c[field];
+      if (arr == null) continue;
+      for (const r of arr) {
+        if (r === c.candidate_id) {
+          push("dep-self", c.candidate_id, c.candidate_id + ": " + field + " references itself");
+        } else if (!seen.has(r)) {
+          push("dep-unknown", c.candidate_id,
+            c.candidate_id + ": " + field + " references unknown id: " + r);
+        }
+      }
+    }
+  }
+
+  // dependency cycles over known, non-self depends_on edges; each cycle once
+  {
+    const color = new Map(); // 1 = on current path, 2 = done
+    for (const start of normalized) {
+      if (color.get(start.candidate_id)) continue;
+      const stack = [[start.candidate_id, 0]];
+      const path = [];
+      while (stack.length) {
+        const frame = stack[stack.length - 1];
+        const id = frame[0];
+        if (frame[1] === 0) { color.set(id, 1); path.push(id); }
+        const node = byId.get(id);
+        const deps = node && Array.isArray(node.depends_on) ? node.depends_on : [];
+        if (frame[1] < deps.length) {
+          const d = deps[frame[1]++];
+          if (d === id || !byId.has(d)) continue; // self/unknown reported above
+          const st = color.get(d);
+          if (st === 1) {
+            const cycle = path.slice(path.indexOf(d)).concat(d);
+            push("dep-cycle", d, "dependency cycle: " + cycle.join(" → "));
+          } else if (!st) {
+            stack.push([d, 0]);
+          }
+        } else {
+          color.set(id, 2);
+          stack.pop();
+          path.pop();
+        }
+      }
+    }
+  }
+
+  // status: derive, check stored consistency, mark eligibility
+  for (const c of normalized) {
+    const rollup = c.rollup || {};
+    const action = rollup.recommended_action != null ? String(rollup.recommended_action) : null;
+    const bb = rollup.blocked_by;
+    const blockedByOpen = Array.isArray(bb) ? bb.length > 0 : bb != null && String(bb).trim() !== "";
+    const unresolvedDeps = (Array.isArray(c.depends_on) ? c.depends_on : []).filter((d) => {
+      if (d === c.candidate_id) return false; // reported as dep-self
+      const dep = byId.get(d);
+      return !dep || dep.statusStored !== "completed"; // completed is only ever stored
+    });
+    const derived = deriveStatus({ action: action, judgmentHeavy: c.judgmentHeavy, blockedByOpen: blockedByOpen, unresolvedDeps: unresolvedDeps });
+    c.statusDerived = derived;
+    c.status = c.statusStored || derived;
+    if (c.statusStored === "ready" && derived !== "ready") {
+      push("status-conflict", c.candidate_id,
+        c.candidate_id + ": marked ready but derives " + derived +
+        (unresolvedDeps.length && derived === "blocked" ? " (unresolved depends_on: " + unresolvedDeps.join(", ") + ")" : "") +
+        " — a stored status may be stricter than derived, never looser");
+    }
+    // spine Phase 1 eligibility: effective status ready AND every derived gate
+    // open. An invalid stored status fails closed — never eligible.
+    c.eligible = !c.statusInvalid && c.status === "ready" && derived === "ready";
+  }
+
+  // the machine queue: eligible candidates in stable-comparator order.
+  // Blocked, human-decision, and rejected candidates can never enter it.
+  let queue = normalized.filter((c) => c.eligible).map((c) => c.candidate_id);
+  const humanOrderSkipped = [];
+  const humanOrder = opts && Array.isArray(opts.humanOrder) ? opts.humanOrder.map(String) : null;
+  if (humanOrder) {
+    const eligibleSet = new Set(queue);
+    const picked = [];
+    for (const id of humanOrder) {
+      if (eligibleSet.has(id) && picked.indexOf(id) < 0) picked.push(id);
+      else humanOrderSkipped.push({ candidate_id: id, reason: seen.has(id) ? "ineligible" : "unknown" });
+    }
+    queue = picked.concat(queue.filter((id) => picked.indexOf(id) < 0));
+  }
+
+  return {
+    ok: problems.length === 0,
+    problems,
+    candidates: normalized,
+    queue,
+    humanOrderSkipped,
+    bands,
+    stops: bandStops(bands),
+    spine_version: ledger.spine_version != null ? String(ledger.spine_version) : null,
+    judgmentHeavyCount: normalized.filter((c) => c.judgmentHeavy).length,
+  };
+}
+
+/** Parse the JSON island. Returns { ledger } or { error }. */
+function readLedgerIsland(selector, root) {
+  const el = (root || document).querySelector(selector || "#ledger");
+  if (!el) return { error: "ledger island not found: " + (selector || "#ledger") };
+  try {
+    return { ledger: JSON.parse(el.textContent) };
+  } catch (e) {
+    return { error: "ledger island is not valid JSON: " + e.message };
+  }
+}
+
+/* ---------- rendering (all data goes in via textContent, never markup) --- */
+
+function ledgerEl(tag, style, text) {
+  const el = document.createElement(tag);
+  if (style) el.style.cssText = style;
+  if (text != null) el.textContent = text;
+  return el;
+}
+
+const LEDGER_MONO = "font-family:ui-monospace,SFMono-Regular,Menlo,monospace;";
+
+/** internal: the ⚖ judgment-heavy glyph, word carried in the tooltip/aria. */
+function judgmentGlyph(c) {
+  const g = ledgerEl("span", LEDGER_MONO + "font-size:11px;color:var(--ink-muted,#898781);margin-left:6px;", "⚖");
+  const label = "judgment-heavy: human_decision_risk " + c.scores.human_decision_risk + "/5";
+  g.title = label;
+  g.setAttribute("role", "img");
+  g.setAttribute("aria-label", label);
+  return g;
+}
+
+/** Render the ranked ledger rows into a container. Rank, title, inline score
+ * bar (fill = position on the −10…+22 axis), mono priority, ⚖ when hdr ≥ 4. */
+function renderLedgerRows(el, verified) {
+  el.textContent = "";
+  for (const c of verified.candidates) {
+    const row = ledgerEl("div", "display:flex;align-items:center;gap:12px;padding:8px 0;border-bottom:1px solid var(--hairline,#e1e0d9);");
+    row.setAttribute("data-ledger-row", c.candidate_id);
+    row.appendChild(ledgerEl("span", LEDGER_MONO + "font-weight:700;font-size:14px;min-width:22px;text-align:right;color:" + c.band.color + ";", String(c.rank)));
+    const title = ledgerEl("span", "font-family:Georgia,'Times New Roman',serif;font-size:15px;color:var(--ink-primary,#0b0b0b);flex:0 1 auto;", c.title);
+    row.appendChild(title);
+    if (c.judgmentHeavy) row.appendChild(judgmentGlyph(c));
+    if (c.effort) {
+      const eff = ledgerEl("span", LEDGER_MONO + "font-size:9px;border:1px solid var(--hairline,#e1e0d9);border-radius:4px;padding:0 4px;color:var(--ink-muted,#898781);", c.effort);
+      eff.setAttribute("data-chip", "effort");
+      eff.title = "effort " + c.effort + " (S < M < L)";
+      row.appendChild(eff);
+    }
+    if (c.unlocks && c.unlocks.length) {
+      const un = ledgerEl("span", LEDGER_MONO + "font-size:9px;border:1px solid var(--hairline,#e1e0d9);border-radius:4px;padding:0 4px;color:var(--ink-muted,#898781);", "unlocks " + c.unlocks.length);
+      un.setAttribute("data-chip", "unlocks");
+      un.title = "unlocks: " + c.unlocks.join(", ");
+      row.appendChild(un);
+    }
+    const track = ledgerEl("span", "flex:1 1 60px;height:4px;border-radius:2px;background:var(--hairline,#e1e0d9);min-width:60px;position:relative;overflow:hidden;");
+    const fill = ledgerEl("span", "position:absolute;left:0;top:0;bottom:0;border-radius:2px;background:" + c.band.color + ";width:" + c.fillPct.toFixed(1) + "%;");
+    track.title = "priority " + c.computed.priority + " at " + c.fillPct.toFixed(1) + "% of the −10…+22 axis";
+    track.appendChild(fill);
+    row.appendChild(track);
+    row.appendChild(ledgerEl("span", LEDGER_MONO + "font-size:12px;color:var(--ink-secondary,#52514e);min-width:52px;text-align:right;", "pri " + c.computed.priority));
+    el.appendChild(row);
+  }
+}
+
+/** Render the full strength meter for one candidate: verdict line, derived
+ * band track, and a DIVERGING contribution histogram (value bars up, risk
+ * bars down) with the recomputed equation as its caption. */
+function renderMeterInto(el, c, verified) {
+  el.textContent = "";
+  el.classList.add("ledger-meter");
+
+  // 1 · verdict line
+  const verdict = ledgerEl("div", "display:flex;align-items:baseline;gap:10px;margin-bottom:8px;");
+  verdict.appendChild(ledgerEl("span", "font-weight:700;font-size:14px;color:" + c.band.color + ";", c.band.icon + " " + c.band.label));
+  verdict.appendChild(ledgerEl("span", LEDGER_MONO + "font-size:12px;color:var(--ink-secondary,#52514e);", "priority " + c.computed.priority + " / " + LEDGER_RANGE.max));
+  if (c.judgmentHeavy) verdict.appendChild(judgmentGlyph(c));
+  el.appendChild(verdict);
+
+  // 2 · band track — background stops DERIVED from the bands config
+  const stops = verified.stops;
+  const track = ledgerEl("div", "position:relative;height:12px;border-radius:6px;overflow:hidden;background:linear-gradient(to right, rgba(137,135,129,.18) 0 " + stops[0] + "%, rgba(250,178,25,.18) " + stops[0] + "% " + stops[1] + "%, rgba(12,163,12,.16) " + stops[1] + "% 100%);");
+  track.title = "−10…+22 axis · band stops derived at " + stops.map((s) => s.toFixed(1) + "%").join(" / ");
+  for (const s of stops) {
+    track.appendChild(ledgerEl("span", "position:absolute;top:0;bottom:0;left:" + s + "%;width:1px;background:var(--baseline,#c3c2b7);"));
+  }
+  track.appendChild(ledgerEl("span", "position:absolute;left:0;top:0;bottom:0;background:" + c.band.color + ";opacity:.92;width:" + c.fillPct.toFixed(1) + "%;"));
+  el.appendChild(track);
+
+  // 3 · diverging contribution histogram + equation caption
+  const H = 30; // px per 5-score half
+  const histo = ledgerEl("div", "display:flex;align-items:stretch;gap:6px;margin-top:10px;");
+  const column = (key, kind) => {
+    const score = Number(c.scores[key]);
+    const col = ledgerEl("div", "display:flex;flex-direction:column;align-items:center;width:20px;");
+    col.setAttribute("data-histo-bar", key);
+    col.setAttribute("data-dir", kind === "value" ? "up" : "down");
+    const up = ledgerEl("div", "height:" + H + "px;display:flex;align-items:flex-end;width:100%;justify-content:center;");
+    const down = ledgerEl("div", "height:" + H + "px;display:flex;align-items:flex-start;width:100%;justify-content:center;");
+    const bar = ledgerEl("div", "width:12px;border-radius:2px;height:" + ((score / 5) * H).toFixed(1) + "px;background:" + (kind === "value" ? "var(--ink-secondary,#52514e)" : "rgba(208,59,59,.65)") + ";");
+    const label = key + " " + score + "/5 (" + (kind === "value" ? "value, adds" : "risk, subtracts") + ")";
+    bar.title = label;
+    bar.setAttribute("role", "img");
+    bar.setAttribute("aria-label", label);
+    (kind === "value" ? up : down).appendChild(bar);
+    col.appendChild(up);
+    col.appendChild(ledgerEl("div", "height:1px;width:100%;background:var(--baseline,#c3c2b7);"));
+    col.appendChild(down);
+    col.appendChild(ledgerEl("div", LEDGER_MONO + "font-size:9px;color:var(--ink-muted,#898781);margin-top:3px;", LEDGER_SCORE_ABBR[key]));
+    return col;
+  };
+  for (const k of LEDGER_SCORE_KEYS.value) histo.appendChild(column(k, "value"));
+  histo.appendChild(ledgerEl("div", "width:8px;"));
+  for (const k of LEDGER_SCORE_KEYS.risk) histo.appendChild(column(k, "risk"));
+  el.appendChild(histo);
+  el.appendChild(ledgerEl("div", LEDGER_MONO + "font-size:10px;color:var(--ink-muted,#898781);margin-top:6px;", "Σ value " + c.computed.value + " − Σ risk " + c.computed.risk + " = " + c.computed.priority));
+}
+
+/** Fill a rank-rail placeholder: the big serif number, band-coloured. */
+function renderRankInto(el, c) {
+  el.textContent = String(c.rank);
+  el.style.color = c.band.color;
+  el.title = c.band.label + " · priority " + c.computed.priority;
+}
+
+/** Visible legend for the eight score abbreviations — rendered from the same
+ * arrays the histogram uses, so it can never drift from the bars. Tooltips
+ * are hover-only; this puts the names on the page (touch screens included). */
+function renderScoreLegendInto(el) {
+  el.textContent = "";
+  el.classList.add("ledger-score-legend");
+  const pretty = (k) => k.replace(/_/g, " ").replace("human decision", "human-decision");
+  const group = (label, keys, note) => {
+    const row = ledgerEl("div", "display:flex;flex-wrap:wrap;align-items:baseline;gap:4px 14px;margin-top:4px;");
+    row.appendChild(ledgerEl("span", LEDGER_MONO + "font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted,#898781);min-width:104px;", label + " · " + note));
+    for (const k of keys) {
+      const item = ledgerEl("span", LEDGER_MONO + "font-size:10px;color:var(--ink-secondary,#52514e);white-space:nowrap;");
+      item.setAttribute("data-legend-item", LEDGER_SCORE_ABBR[k]);
+      item.title = LEDGER_SCORE_DEFS[k];
+      item.appendChild(ledgerEl("b", "font-weight:700;color:var(--ink-primary,#0b0b0b);", LEDGER_SCORE_ABBR[k]));
+      item.appendChild(document.createTextNode(" " + pretty(k)));
+      row.appendChild(item);
+    }
+    el.appendChild(row);
+  };
+  group("value", LEDGER_SCORE_KEYS.value, "adds");
+  group("risk", LEDGER_SCORE_KEYS.risk, "subtracts");
+  el.appendChild(ledgerEl("div", LEDGER_MONO + "font-size:9px;color:var(--ink-muted,#898781);margin-top:6px;",
+    "priority = Σ value − Σ risk · each score 1–5 · scale −10…+22"));
+}
+
+/** Verify hand-placed cards sit in rank order and reference real ids. */
+function verifyCardOrder(root, verified, problems) {
+  const byId = new Map(verified.candidates.map((c) => [c.candidate_id, c]));
+  const cards = Array.from((root || document).querySelectorAll("[data-candidate]"));
+  let lastRank = 0;
+  for (const card of cards) {
+    const id = card.getAttribute("data-candidate");
+    const c = byId.get(id);
+    if (!c) {
+      problems.push({ code: "unknown-card", candidate_id: id, message: "card references unknown candidate_id: " + id });
+      continue;
+    }
+    if (c.rank <= lastRank) {
+      problems.push({ code: "card-order", candidate_id: id, message: "card " + id + " (rank " + c.rank + ") appears after a higher rank — cards must follow priority order" });
+    }
+    lastRank = Math.max(lastRank, c.rank);
+  }
+}
+
+/** The masthead chip. data-ok is set for harnesses; the word carries the
+ * verdict, never colour alone. */
+function renderChipInto(el, verified) {
+  el.textContent = "";
+  el.setAttribute("data-ok", verified.ok ? "1" : "0");
+  const base = LEDGER_MONO + "display:inline-flex;align-items:center;gap:6px;font-size:11px;font-weight:600;padding:4px 10px;border-radius:999px;";
+  if (verified.ok) {
+    el.style.cssText = base + "color:#0ca30c;border:1px solid rgba(12,163,12,.4);background:rgba(12,163,12,.08);";
+    let text = "✓ scoring verified · " + verified.candidates.length + " candidates";
+    if (Array.isArray(verified.queue)) text += " · " + verified.queue.length + " eligible";
+    text += " · formula recomputed";
+    if (verified.judgmentHeavyCount) text += " · " + verified.judgmentHeavyCount + " judgment-heavy";
+    if (verified.spine_version) text += " · spine v" + verified.spine_version;
+    el.textContent = text;
+    el.title = "priority_score recomputed from the eight sub-scores for every candidate; bands, fills, and rank order derived and checked";
+  } else {
+    el.style.cssText = base + "color:#d03b3b;border:1px solid rgba(208,59,59,.45);background:rgba(208,59,59,.08);";
+    el.textContent = "✗ scoring failed · " + verified.problems.length + " problem" + (verified.problems.length === 1 ? "" : "s");
+    el.title = verified.problems.map((p) => p.message).join("\n");
+  }
+}
+
+/** Optional: print problems as a readable list (report footer, fixtures). */
+function renderProblemsInto(el, verified) {
+  el.textContent = "";
+  if (verified.ok) return;
+  for (const p of verified.problems) {
+    el.appendChild(ledgerEl("li", LEDGER_MONO + "font-size:11px;color:#d03b3b;", "[" + p.code + "] " + p.message));
+  }
+}
+
+/**
+ * Orchestrator. Reads the island, verifies, renders every numeric display,
+ * checks card order, sets the chip. Never throws — a broken island degrades
+ * to a red chip and an intact page. Resolves the full verified result.
+ */
+function runLedger(options) {
+  const opts = options || {};
+  const root = opts.root || document;
+  const chip = root.querySelector(opts.chipSelector || "[data-verify-chip]");
+  try {
+    const read = readLedgerIsland(opts.islandSelector || "#ledger", root);
+    if (read.error) {
+      const failed = { ok: false, problems: [{ code: "island", candidate_id: null, message: read.error }], candidates: [], queue: [], humanOrderSkipped: [], stops: bandStops(), judgmentHeavyCount: 0, spine_version: null };
+      if (chip) renderChipInto(chip, failed);
+      return failed;
+    }
+    const verified = verifyLedger(read.ledger, { bands: opts.bands, humanOrder: opts.humanOrder });
+
+    const ledgerBox = root.querySelector(opts.ledgerSelector || "[data-ledger]");
+    if (ledgerBox) renderLedgerRows(ledgerBox, verified);
+    for (const c of verified.candidates) {
+      const meter = root.querySelector('[data-meter="' + c.candidate_id + '"]');
+      if (meter) renderMeterInto(meter, c, verified);
+      const rank = root.querySelector('[data-rank="' + c.candidate_id + '"]');
+      if (rank) renderRankInto(rank, c);
+    }
+    const legendBox = root.querySelector(opts.legendSelector || "[data-score-legend]");
+    if (legendBox) renderScoreLegendInto(legendBox);
+    root.querySelectorAll("[data-meter],[data-rank]").forEach((el) => {
+      const id = el.getAttribute("data-meter") || el.getAttribute("data-rank");
+      if (!verified.candidates.some((c) => c.candidate_id === id)) {
+        verified.problems.push({ code: "unknown-placeholder", candidate_id: id, message: "placeholder references unknown candidate_id: " + id });
+      }
+    });
+    verifyCardOrder(root, verified, verified.problems);
+    verified.ok = verified.problems.length === 0;
+
+    if (chip) renderChipInto(chip, verified);
+    const problemsBox = root.querySelector(opts.problemsSelector || "[data-verify-problems]");
+    if (problemsBox) renderProblemsInto(problemsBox, verified);
+    return verified;
+  } catch (error) {
+    const failed = { ok: false, problems: [{ code: "harness", candidate_id: null, message: "ledger-verify crashed: " + ((error && error.message) || String(error)) }], candidates: [], queue: [], humanOrderSkipped: [], stops: bandStops(), judgmentHeavyCount: 0, spine_version: null };
+    if (chip) renderChipInto(chip, failed);
+    return failed;
+  }
+}
+
+globalThis.LedgerVerify = {
+  LEDGER_SCORE_KEYS,
+  LEDGER_SCORE_ABBR,
+  LEDGER_RANGE,
+  LEDGER_DEFAULT_BANDS,
+  LEDGER_EFFORT_ORDER,
+  LEDGER_STATUS_VALUES,
+  effortRank,
+  deriveStatus,
+  fillPercent,
+  computePriority,
+  bandFor,
+  bandStops,
+  tieBreakCompare,
+  verifyLedger,
+  readLedgerIsland,
+  renderLedgerRows,
+  renderMeterInto,
+  renderRankInto,
+  renderScoreLegendInto,
+  verifyCardOrder,
+  renderChipInto,
+  renderProblemsInto,
+  runLedger,
+};
+
+mermaid.initialize({ startOnLoad:false, theme:"neutral", securityLevel:"loose" });
+window.addEventListener("DOMContentLoaded", () => {
+  try { renderAllGraphs("[data-graph]", mermaid); } catch(e) {}
+  LedgerVerify.runLedger({});
+});
+</script>
+<style>
+.report-root {
+  --surface-1:#fcfcfb; --page:#f4f4f1; --ink-primary:#0b0b0b; --ink-secondary:#52514e;
+  --ink-muted:#898781; --hairline:#e1e0d9; --baseline:#c3c2b7; --border:rgba(11,11,11,.10);
+  --accent:#2a78d6; --accent-deep:#256abf; --accent-faint:#86b6ef;
+  --good:#0ca30c; --warning:#fab219; --serious:#ec835a; --critical:#d03b3b; --deep-fill:#2c2c2a;
+}
+@media (prefers-color-scheme: dark) {
+  .report-root {
+    --surface-1:#1a1a19; --page:#0d0d0d; --ink-primary:#ffffff; --ink-secondary:#c3c2b7;
+    --ink-muted:#898781; --hairline:#2c2c2a; --baseline:#383835; --border:rgba(255,255,255,.10);
+    --accent:#3987e5; --accent-deep:#1c5cab; --accent-faint:#184f95; --deep-fill:#000000;
+  }
+}
+body { background:var(--page); color:var(--ink-primary); }
+a { color:var(--accent-deep); } a:hover { color:var(--accent); }
+code { background:rgba(137,135,129,.14); border-radius:4px; padding:0 4px; }
+.deep { background:var(--deep-fill); color:#fff; }
+@keyframes rise { from { opacity:0; transform:translateY(10px); } }
+</style>
+</head>
+<body class="report-root font-sans" data-palette="#2a78d6">
+<script type="application/json" id="ledger">{"spine_version": 3, "generated": "2026-07-24", "candidates": [{"candidate_id": "readiness-scalar-decoy", "title": "Delete the combined-readiness decoy seam", "evidence": [{"file": "app/services/readiness_service.py", "line": 458, "observation": "combined_readiness_scalar body is just compute_readiness(...).score/100.0; grep finds zero production callers."}, {"file": "app/services/prescription_service.py", "line": 386, "observation": "Prescriber reimplements the /100.0 inline because it also needs the full readiness object; the seam is bypassed."}], "scores": {"severity": 2, "confidence": 5, "leverage": 2, "locality": 5, "testability": 4, "blast_radius": 1, "regression_risk": 1, "human_decision_risk": 1}, "rollup": {"recommended_action": "direct-fix"}, "effort": "S", "status": "ready"}, {"candidate_id": "history-fixtures", "title": "Stop shipping fixtures to signed-in athletes on History", "evidence": [{"file": "web/src/perflab/screens/HistoryScreen.tsx", "line": 308, "observation": "Readiness headline hardcoded 64 outside any token/data guard; VO2max/aerobic cards at :329-338 are invented numbers every signed-in user sees."}, {"file": "web/src/perflab/screens/HistoryScreen.tsx", "line": 260, "observation": "realLoad is null for an authed user with no workouts, so loadSeries falls back to LOAD_BARS; readinessSeries (:255) falls back to the DAYS sim curve — a new athlete sees a fabricated 12-week trend as their own."}], "scores": {"severity": 4, "confidence": 5, "leverage": 4, "locality": 4, "testability": 3, "blast_radius": 2, "regression_risk": 2, "human_decision_risk": 2}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "confidence-status-literal", "title": "Type the confidence band once as a Literal", "evidence": [{"file": "app/schemas/state.py", "line": 76, "observation": "capacity_confidence_status typed dict[str,str]; assessment.py:22 and onboarding.py:45 also bare str, so OpenAPI emits 'string'."}, {"file": "web/src/perflab/screens/twin/CapacityView.tsx", "line": 62, "observation": "Web re-declares type ConfStatus = established|provisional|insufficient by hand; AssessmentSurfaceScreen.tsx:25 keeps a second CONF map. A renamed band passes tsc and silently breaks the lookups."}], "scores": {"severity": 2, "confidence": 5, "leverage": 4, "locality": 4, "testability": 3, "blast_radius": 2, "regression_risk": 1, "human_decision_risk": 2}, "rollup": {"recommended_action": "direct-fix"}, "effort": "S", "status": "ready"}, {"candidate_id": "display-loader-dead", "title": "Remove the zero-caller display state loader", "evidence": [{"file": "app/services/state_service.py", "line": 382, "observation": "load_current_state_for_display + ReadOnlyStateView/reconstruct_legacy_state_for_display plumbing; no caller in app/ (only tests + a loader-allowlist). The repo's own audit already flags 'built, zero callers'."}], "scores": {"severity": 2, "confidence": 4, "leverage": 2, "locality": 5, "testability": 4, "blast_radius": 1, "regression_risk": 1, "human_decision_risk": 2}, "rollup": {"recommended_action": "direct-fix"}, "effort": "S", "status": "ready"}, {"candidate_id": "repo-construction-seam", "title": "Keep repository construction inside its seam", "evidence": [{"file": "app/api/v1/history.py", "line": 51, "observation": "/workouts news up AthleteContextRepository(db) in the handler; the same file's /state-history (:41) correctly delegates through a state_service loader. CONTEXT.md's contract says no route constructs the repository directly."}], "scores": {"severity": 2, "confidence": 4, "leverage": 2, "locality": 4, "testability": 3, "blast_radius": 2, "regression_risk": 1, "human_decision_risk": 2}, "rollup": {"recommended_action": "direct-fix"}, "effort": "S", "status": "ready"}, {"candidate_id": "today-session-resolver", "title": "Resolve today's target session in one place", "evidence": [{"file": "app/services/prescription_service.py", "line": 330, "observation": "The no-planned-session branch scopes to the latest ACTIVE block with NO ORDER BY before .limit(1) — nondeterministic row when an athlete has >1 pending session that day."}, {"file": "app/services/planning_service.py", "line": 267, "observation": "get_today_session is user-wide + ORDER BY id ASC LIMIT 1; the two prescribe entry points CONTEXT.md says must agree by construction can target different sessions."}], "scores": {"severity": 4, "confidence": 4, "leverage": 4, "locality": 3, "testability": 4, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 3}, "rollup": {"recommended_action": "design"}, "effort": "M", "status": "ready"}, {"candidate_id": "prescription-content-type", "title": "Give prescribed content a named type at the seam", "evidence": [{"file": "app/schemas/planning.py", "line": 94, "observation": "prescription: dict[str,Any] and prescribed_content: dict[str,Any]; OpenAPI emits unknown, so OverviewScreen re-declares a hand-written type PrescDict (:149) — the manual-mirror drift ADR-0020/0021/0025 warns about."}, {"file": "app/schemas/prescription.py", "line": 85, "observation": "to_prescribed_content -> model_dump(); /next-session returns a typed WorkoutPrescription but the same object on /planning/today loses its type identity at the wire."}], "scores": {"severity": 3, "confidence": 5, "leverage": 4, "locality": 3, "testability": 3, "blast_radius": 3, "regression_risk": 2, "human_decision_risk": 3}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "prescribe-phases", "title": "Split the prescribe-and-persist god-function into phases", "evidence": [{"file": "app/services/prescription_service.py", "line": 269, "observation": "One 170-line function: load/init, weak-points, block+target resolution, context, objectives, goal, signals, score, persist, then 3 best-effort telemetry writes. The commit-before-shadow ordering guarantee is expressed only as sequential statements + comments."}], "scores": {"severity": 3, "confidence": 4, "leverage": 4, "locality": 3, "testability": 3, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 1}, "rollup": {"recommended_action": "design"}, "effort": "M", "status": "ready"}, {"candidate_id": "web-state-adapter", "title": "One typed adapter for state + capacity mapping", "evidence": [{"file": "web/src/perflab/screens/TwinScreen.tsx", "line": 43, "observation": "meanFatigue comment literally reads 'Copied module-local from OverviewScreen (not shared)'; the fatigue/readiness/tissue arithmetic exists in 3 slightly-different copies, only testable through a rendered screen."}, {"file": "web/src/perflab/screens/twin/CapacityView.tsx", "line": 44, "observation": "Capacity-axis field->label->ceiling table defined here (5 axes), again in projection.ts:46 (8 axes), again ad-hoc in OverviewScreen:386; string-keyed fRec lookups silently zero on a backend rename."}], "scores": {"severity": 3, "confidence": 4, "leverage": 3, "locality": 3, "testability": 4, "blast_radius": 3, "regression_risk": 2, "human_decision_risk": 2}, "rollup": {"recommended_action": "design"}, "effort": "M", "status": "ready", "unlocks": ["overview-view-model"]}, {"candidate_id": "dashboard-typed-mapping", "title": "Own the dashboard row->schema mapping in one place", "evidence": [{"file": "app/services/dashboard_service.py", "line": 225, "observation": "KPI/anchor built as string-keyed dict literals, re-splatted as KPIValueOut(**k) in the route (unchecked); domain_summary reaches in by k['domain']."}, {"file": "app/services/dashboard_service.py", "line": 292, "observation": "kpi_flags is a dict[str,Any] built from inline magic thresholds (>14.0, <3.0, <72.0); the web can't type it and the thresholds aren't named policy."}], "scores": {"severity": 2, "confidence": 4, "leverage": 3, "locality": 3, "testability": 4, "blast_radius": 2, "regression_risk": 2, "human_decision_risk": 2}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "weakpoints-router-seam", "title": "Move weak-points schemas and mutation off the router", "evidence": [{"file": "app/api/v1/weak_points.py", "line": 26, "observation": "The one router that defines its Pydantic schemas inline (unlike every peer in app/schemas/*), news up the repository in-handler at :60/:78/:109, and does PATCH field-diffing + tz normalization + commit directly in the route."}], "scores": {"severity": 2, "confidence": 4, "leverage": 3, "locality": 3, "testability": 3, "blast_radius": 2, "regression_risk": 2, "human_decision_risk": 1}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "coupling-constants-params", "title": "Lift the fatigue/tissue coupling constants into EngineParameters", "evidence": [{"file": "app/logic/state_update_v0.py", "line": 351, "observation": "fatigue_impulse_from_dose / tissue_impulse_from_dose map a StressDose onto the 6-axis impulse via ~18 inline literals with no model_version, no EngineParameters field, no override path."}, {"file": "app/engine/parameters.py", "line": 15, "observation": "parameters.py carefully centralizes dose exponents, volume weights, shape-by-modality, taus — half the dose law is hierarchical/versioned and half is frozen in function bodies."}], "scores": {"severity": 3, "confidence": 4, "leverage": 4, "locality": 2, "testability": 3, "blast_radius": 3, "regression_risk": 2, "human_decision_risk": 2}, "rollup": {"recommended_action": "design"}, "effort": "M", "status": "ready"}, {"candidate_id": "session-intensity-samples", "title": "Hoist ADR-0039 sample construction above its seam", "evidence": [{"file": "app/services/state_service.py", "line": 689, "observation": "build_session_external_intensity is pure and testable, but the per-set to_failure decision, the fidelity string, the reps*load weight and e1RM denominator wiring are all scattered in _apply_sets_to_log above the seam."}, {"file": "app/logic/dose_routing.py", "line": 115, "observation": "to_failure (rir<=0 or rpe>=9.5) is re-derived a third time inside dose_routing._to_failure — three copies that must agree."}], "scores": {"severity": 3, "confidence": 4, "leverage": 4, "locality": 2, "testability": 4, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 2}, "rollup": {"recommended_action": "design"}, "effort": "M", "status": "ready"}, {"candidate_id": "planning-reschedule-service", "title": "Move the reschedule state machine into the service", "evidence": [{"file": "app/api/v1/planning.py", "line": 120, "observation": "update_session owns the reschedule rule inline: preserve original_scheduled_date on first move + auto-transition to RESCHEDULED unless an explicit status was sent, plus the ownership query and commit — real domain logic in an HTTP handler, only exercisable through the router."}], "scores": {"severity": 2, "confidence": 4, "leverage": 3, "locality": 3, "testability": 3, "blast_radius": 2, "regression_risk": 3, "human_decision_risk": 1}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "e1rm-denominator-resolver", "title": "One canonical current-e1RM resolver for the dose invariant", "evidence": [{"file": "app/services/state_service.py", "line": 820, "observation": "'latest valid observation per code' is reimplemented across 4 services; the ADR-0056 invariant ('same set -> same I everywhere') is guaranteed only by a code comment saying it matches prescription_service, not a shared function."}, {"file": "app/services/dose_routing_shadow_service.py", "line": 25, "observation": "The shadow dose path re-derives exercise->code->denominator and the id:/name: key convention independently of the live path; a resolution divergence silently breaks the old-vs-new distribution match k_fatigue_v1 depends on."}], "scores": {"severity": 3, "confidence": 4, "leverage": 4, "locality": 2, "testability": 4, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 2}, "rollup": {"recommended_action": "design"}, "effort": "L", "status": "ready"}, {"candidate_id": "guest-preview-split", "title": "Split guest previews and share the tissue body-map", "evidence": [{"file": "web/src/perflab/screens/TwinScreen.tsx", "line": 646, "observation": "The tissue body-map SVG is duplicated nearly verbatim between the authed TissueBody (:385) and GuestTwinPreview (:646); each screen file carries two full render trees (~254 sim lines in TwinScreen)."}], "scores": {"severity": 2, "confidence": 4, "leverage": 2, "locality": 3, "testability": 2, "blast_radius": 2, "regression_risk": 2, "human_decision_risk": 1}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready"}, {"candidate_id": "overview-view-model", "title": "Extract a view-model from the Overview god-component", "evidence": [{"file": "web/src/perflab/screens/OverviewScreen.tsx", "line": 37, "observation": "625-line screen: 6 live resources, guest/sim fallbacks, insights derivation, a module-global checkinPromptShown side-effect flag, plus mapping helpers; reading one tile's number bounces across sim.ts, store.tsx, perfLabClient.ts, macrocycles.ts, objectives.ts, types.ts."}], "scores": {"severity": 2, "confidence": 4, "leverage": 3, "locality": 2, "testability": 3, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 1}, "rollup": {"recommended_action": "design"}, "effort": "L", "status": "ready"}, {"candidate_id": "tissue-phi-passthrough", "title": "Carry per-exercise tissue phi through StressDose", "evidence": [{"file": "app/logic/dose_engine_v0.py", "line": 345, "observation": "calculate_stress_dose computes phi_tissue per-exercise then discards it (the else fallback never assigns it); tissue is re-derived in state_update_v0.py:367 via a fresh default_phi_for_row on the session modality — the 'tissue routed off the lossy label' ADR-0054 exists to fix."}], "scores": {"severity": 3, "confidence": 4, "leverage": 3, "locality": 3, "testability": 3, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 4}, "rollup": {"recommended_action": "design", "blocked_by": ["numerical-correctness: tissue feeds safety gates; sign-off needed before changing tissue impulses"]}, "effort": "M", "status": "needs-human-decision"}, {"candidate_id": "resource-status-hook", "title": "Push resource status into the shared hook", "evidence": [{"file": "web/src/perflab/hooks/useAuthedResource.ts", "line": 18, "observation": "Hook returns {data,loading,error} but leaves the 'first render is loading:false before the effect' disambiguation to every caller; the same comment+branch are copied across PlanningScreen/ObjectivesScreen/ProgramSection, and notice copy is re-styled 5+ times with subtle divergence (some treat error as empty)."}], "scores": {"severity": 2, "confidence": 4, "leverage": 3, "locality": 2, "testability": 3, "blast_radius": 4, "regression_risk": 3, "human_decision_risk": 1}, "rollup": {"recommended_action": "direct-fix"}, "effort": "M", "status": "ready", "unlocks": ["overview-view-model"]}, {"candidate_id": "session-fallback-phi", "title": "One conservative session-fallback phi helper", "evidence": [{"file": "app/logic/state_update_v0.py", "line": 371, "observation": "The 'no resolved phi, fall back to conservative session-modality shape' idea is open-coded 4x; tissue_impulse_from_dose uses skill=0.5/impact=0.65/0.5 while the dose base uses 0.55/0.75 — a session's fatigue base and tissue routing are shaped by two silently different fallback vectors."}], "scores": {"severity": 3, "confidence": 4, "leverage": 3, "locality": 2, "testability": 3, "blast_radius": 3, "regression_risk": 3, "human_decision_risk": 4}, "rollup": {"recommended_action": "design", "blocked_by": ["numerical-correctness: which anchor (0.5 vs 0.55, 0.65 vs 0.75) becomes canonical"]}, "effort": "M", "status": "needs-human-decision"}, {"candidate_id": "interference-double-count", "title": "Apply concurrent interference exactly once", "evidence": [{"file": "app/logic/state_update_v0.py", "line": 497, "observation": "Interference multiplies hypertrophy/max_strength in the step-4 Banister bump AND again in _apply_adaptation_gains (:403), driven by two different signals; the comments at :434 and :505 are actively arguing which block owns CNS/interference — evidence of a contested seam and a possible double-count."}], "scores": {"severity": 4, "confidence": 3, "leverage": 4, "locality": 2, "testability": 3, "blast_radius": 4, "regression_risk": 4, "human_decision_risk": 4}, "rollup": {"recommended_action": "design", "blocked_by": ["physiology/policy: whether both drives should each carry interference is a numerical-correctness call, not a mechanical merge"]}, "effort": "L", "status": "needs-human-decision"}]}</script>
+<main class="max-w-5xl mx-auto px-6 py-12 space-y-8" style="animation:rise .5s ease both">
+
+  <header class="space-y-4">
+    <div style="background:var(--surface-1);border:1px solid var(--border);border-radius:16px;padding:28px 26px;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12)">
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:11px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-muted)">Deepening opportunities &middot; architecture review</div>
+      <div style="display:flex;flex-wrap:wrap;gap:20px;align-items:flex-end;margin-top:8px">
+        <div style="flex:1 1 320px">
+          <h1 style="font-family:Georgia,serif;font-size:40px;font-weight:600;letter-spacing:-.025em;margin:0;color:var(--ink-primary)">perf-lab-api</h1>
+          <div style="font-family:Georgia,serif;font-style:italic;font-size:16px;color:var(--ink-secondary);margin-top:6px">Twenty-one deepenings surfaced across services, engine, api-contract, and web &mdash; scored, ranked, and self-verified.</div>
+        </div>
+        <div style="display:flex;gap:22px;text-align:right">
+          <div><div style="font-family:Space Grotesk,sans-serif;font-size:30px;font-weight:600;color:var(--ink-primary)">21</div><div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--ink-muted)">candidates</div></div>
+          <div><div style="font-family:Space Grotesk,sans-serif;font-size:30px;font-weight:600;color:var(--good)">4</div><div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--ink-muted)">strong</div></div>
+          <div><div style="font-family:Space Grotesk,sans-serif;font-size:30px;font-weight:600;color:var(--accent-deep)">15</div><div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;color:var(--ink-muted)">top priority</div></div>
+        </div>
+      </div>
+      <div style="border-top:1px solid var(--hairline);margin-top:16px;padding-top:10px;display:flex;flex-wrap:wrap;gap:14px;align-items:center;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-muted)">
+        <span style="white-space:nowrap">2026-07-24</span><span style="white-space:nowrap">branch main</span><span style="white-space:nowrap">commit a1e981a</span><span style="white-space:nowrap">mode production-flywheel</span>
+        <span data-verify-chip></span>
+      </div>
+    </div>
+
+    <!-- HERO: start here -->
+    <div style="background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--good);border-radius:16px;padding:20px 22px;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12)">
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--good)">Start here &middot; &#10003; the quick, certain wins first</div>
+      <div style="font-family:Georgia,serif;font-size:20px;font-weight:600;margin-top:4px"><a href="#candidate-1">Clear the deck with the four Strong deletion/typing wins</a></div>
+      <div style="font-family:Georgia,serif;font-style:italic;font-size:14px;color:var(--ink-secondary);margin-top:4px">The top of the queue is cheap and certain &mdash; delete two dead seams (<a href="#candidate-1">readiness decoy</a>, <a href="#candidate-4">display loader</a>), pin the <a href="#candidate-3">confidence Literal</a>, then land the mission-critical honesty fix, <a href="#candidate-2">History fixtures</a>. The deeper engine work (dose, interference, tissue) sits lower behind human-decision gates.</div>
+    </div>
+
+    <!-- RANKED LEDGER -->
+    <div style="background:var(--surface-1);border:1px solid var(--border);border-radius:16px;padding:20px 22px;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12)">
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--ink-muted);margin-bottom:8px">Ranked ledger &middot; the selection index</div>
+      <div data-ledger></div>
+      <div data-score-legend style="margin-top:14px;border-top:1px solid var(--hairline);padding-top:10px"></div>
+    </div>
+
+    <!-- LEGEND -->
+    <div style="font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-muted);display:flex;flex-wrap:wrap;gap:14px">
+      <span>&#9633; module</span><span>&#8230; seam</span><span style="color:var(--critical)">&rarr; leak</span><span>&#9632; deep module</span><span>&#10003; Strong</span><span>&#9680; Worth exploring</span><span>&#9675; Speculative</span><span>&#9888; blocked = human decision</span>
+    </div>
+  </header>
+
+  <section id="candidates" class="space-y-6">
+    
+    <article id="candidate-1" data-candidate="readiness-scalar-decoy" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-1" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="readiness-scalar-decoy" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">services</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Delete the combined-readiness decoy seam</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">readiness-scalar-decoy</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="readiness-scalar-decoy" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/readiness_service.py:458-467</li><li>app/services/prescription_service.py:386-388</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">combined_readiness_scalar()<br>  return score/100  ·  0 callers</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">prescriber owns /100 once</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">combined_readiness_scalar is shallow and dead — interface as wide as its body, zero production callers, while the /100.0 semantics live inline in the prescriber.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Delete it, or make it the real seam by returning (scalar, readiness_obj) so the prescriber stops recomputing.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletion test: concentrates the rule</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> removes a decoy seam that invites drift</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one home for &#x27;score can nudge&#x27;</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-2" data-candidate="history-fixtures" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-2" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="history-fixtures" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">web</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Stop shipping fixtures to signed-in athletes on History</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">history-fixtures</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="history-fixtures" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>web/src/perflab/screens/HistoryScreen.tsx:308</li><li>web/src/perflab/screens/HistoryScreen.tsx:329-338</li><li>web/src/perflab/screens/HistoryScreen.tsx:255-261</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">authed render tree<br>64 · 58.4 · LOAD_BARS · DAYS</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">loading | empty | real only</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">HistoryScreen renders hardcoded VO2max/aerobic cards, a fabricated &#x27;64&#x27; readiness, and silently falls back to sim series for thin history — signed-in athletes see fabricated data.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Give History the loading/empty/real discipline the other screens already have; wire the cards to already-fetched benchmark/state-history data; never sim-fallback for an authed user.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> closes the workstream&#x27;s honesty gap</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> no sim fallback for signed-in users</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> reuses data already fetched in-file</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-3" data-candidate="confidence-status-literal" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-3" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="confidence-status-literal" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Type the confidence band once as a Literal</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">confidence-status-literal</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">4 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="confidence-status-literal" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/schemas/assessment.py:22</li><li>app/schemas/state.py:76</li><li>app/logic/confidence_presentation.py:31-37</li><li>web/src/perflab/screens/twin/CapacityView.tsx:62</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">str  -&gt;  OpenAPI &#x27;string&#x27;<br>hand-mirrored 2x in web</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one Literal, generated union</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The canonical three-value confidence band is typed as bare str in three schemas, so OpenAPI emits string and the web hard-codes the enum in two places.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Define ConfidenceStatus = Literal[&#x27;established&#x27;,&#x27;provisional&#x27;,&#x27;insufficient&#x27;] beside confidence_status() and reference it from all three schemas; the web imports the generated union.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> leverage: one Literal, N surfaces</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> rename becomes a tsc error</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletes a hand-mirrored union</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-4" data-candidate="display-loader-dead" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-4" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="display-loader-dead" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">services</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Remove the zero-caller display state loader</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">display-loader-dead</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="display-loader-dead" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/state_service.py:382-400</li><li>docs/audits/2026-07-17-repo-audit-swarm.html:325</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">load_..._for_display()<br>+ ReadOnlyStateView  ·  0 callers</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">deleted until a surface exists</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">A full public loader with an elaborate contract and its display-only reconstruct path has no caller in app/ — dead weight that looks load-bearing.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Delete it (and the display-only reconstruct path) until a surface needs it, or wire the one surface it was built for.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletion test: removes fake load-bearing</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one less untested-in-prod path</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> shrinks the 7-loader family</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-5" data-candidate="repo-construction-seam" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-5" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="repo-construction-seam" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Keep repository construction inside its seam</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">repo-construction-seam</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="repo-construction-seam" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/api/v1/history.py:51</li><li>app/api/v1/history.py:41</li><li>app/api/v1/weak_points.py:60</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">route: Repo(db).query()<br>seam bypassed</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">route -&gt; loader -&gt; repo</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">A route constructs AthleteContextRepository directly, violating the stated interface contract that every construction site lives inside state_service.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Add a thin state_service.load_recent_workouts loader mirroring the snapshot loader; the route delegates through it.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> seam: one construction site</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> route validates then delegates</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> contract holds uniformly</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-6" data-candidate="today-session-resolver" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-6" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="today-session-resolver" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">services</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Resolve today&#x27;s target session in one place</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">today-session-resolver</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="today-session-resolver" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/planning_service.py:267-285</li><li>app/services/prescription_service.py:316-339</li><li>app/services/state_service.py:535-560</li></ul>
+        <div style="margin:14px 0;border-radius:12px;padding:12px;background:var(--surface-1);border:1px solid var(--border)" data-graph='{"direction": "LR", "nodes": [{"name": "/next-session"}, {"name": "/planning/today"}, {"name": "prescribe no-ORDER-BY", "role": "leak"}, {"name": "get_today_session id ASC"}, {"name": "_match_planned_session"}], "edges": [{"from": 0, "to": 2, "label": "nondeterministic", "role": "leak"}, {"from": 1, "to": 3}, {"from": 0, "to": 4}]}'></div>
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">3 inline resolutions<br>user-wide | block-scoped | no ORDER BY</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one resolver, one ordering</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">&#x27;The pending session for today&#x27; is reassembled inline three ways with different semantics; one branch has no ORDER BY, so /next-session and /planning/today can target different sessions for the same athlete.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">One resolve-today&#x27;s-target-session function both routes and both prescribe branches call, with a single total ordering.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> kills a real nondeterminism</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> ends the route divergence</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one seam, testable</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-7" data-candidate="prescription-content-type" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-7" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="prescription-content-type" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Give prescribed content a named type at the seam</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">prescription-content-type</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">4 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="prescription-content-type" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/schemas/prescription.py:85-93</li><li>app/api/v1/planning.py:159</li><li>app/schemas/planning.py:94</li><li>web/src/perflab/screens/OverviewScreen.tsx:149-156</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">WorkoutPrescription<br>-&gt; dict[str,Any] -&gt; unknown -&gt; PrescDict</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">named schema, generated union</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The one typed prescription shape is flattened to dict[str,Any] on /planning/today and PlannedSessionRead, so OpenAPI emits unknown and the web re-declares it by hand.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Return a named PrescribedContent (or reuse WorkoutPrescription) and type the two response fields as it, so a backend change regenerates the TS union and tsc catches drift.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletes a hand-mirrored type</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> closes two dict[str,Any] holes</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> tsc catches contract drift</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-8" data-candidate="prescribe-phases" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-8" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="prescribe-phases" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">services</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Split the prescribe-and-persist god-function into phases</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">prescribe-phases</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">1 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="prescribe-phases" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/prescription_service.py:269-440</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">prescribe_for_athlete()<br>170 lines, one imperative block</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">5 named phases, one seam</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">prescribe_for_athlete is a 170-line god-function; the ordering-sensitive commit-then-telemetry guarantee lives only in comments, with no seam that makes it checkable.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Extract named phases — gather_context, resolve_targets, score, persist, record_telemetry — so the commit/telemetry boundary becomes a checkable seam.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> locality: the spine every route delegates to</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> commit boundary becomes testable</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> comments become structure</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-9" data-candidate="web-state-adapter" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-9" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="web-state-adapter" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">web</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">One typed adapter for state + capacity mapping</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">web-state-adapter</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">5 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="web-state-adapter" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>web/src/perflab/screens/TwinScreen.tsx:45-51</li><li>web/src/perflab/screens/OverviewScreen.tsx:81-102</li><li>web/src/perflab/screens/HistoryScreen.tsx:13-20</li><li>web/src/perflab/screens/twin/CapacityView.tsx:44-50</li><li>web/src/perflab/screens/projection.ts:46-55</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">meanFatigue x3 · axes table x3<br>string-keyed fRec</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one typed adapter</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The domain mapping from state/capacity vectors to display numbers is copy-pasted across 3-4 screens with divergent key sets and string-keyed lookups that silently zero on a rename.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">One stateVector.ts / capacityAxes.ts adapter (pure, typed keyof CapacityState) that screens import — a deep module with a tiny interface, unit-testable (precedent: scales.test.ts).</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> leverage: one interface, N screens</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> rename becomes a compile error</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> mapping unit-testable off-screen</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-10" data-candidate="dashboard-typed-mapping" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-10" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="dashboard-typed-mapping" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Own the dashboard row-&gt;schema mapping in one place</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">dashboard-typed-mapping</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">4 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="dashboard-typed-mapping" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/dashboard_service.py:225-238</li><li>app/services/dashboard_service.py:292-302</li><li>app/api/v1/dashboard.py:26-29</li><li>app/schemas/dashboard.py:46-51</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">schema | dict | **k<br>magic thresholds inline</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one .from_row mapping</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The dashboard KPI/anchor/flags shapes are declared in the schema, hand-built as untyped dicts in the service, and re-splatted in the route — three sites, no type link, magic thresholds inline.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Build KPIValueOut/AnchorObservationOut directly (or a .from_row classmethod) and model kpi_flags as a typed schema with thresholds lifted to named policy; the route becomes a thin controller.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> collapses 3 sites to 1</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletes the untyped intermediate</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> thresholds become named policy</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-11" data-candidate="weakpoints-router-seam" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-11" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="weakpoints-router-seam" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Move weak-points schemas and mutation off the router</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">weakpoints-router-seam</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="weakpoints-router-seam" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/api/v1/weak_points.py:26-42</li><li>app/api/v1/weak_points.py:60-114</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">router: schemas + Repo() + commit + tz</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">schema module + repo seam</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The weak-points router inlines its schemas, constructs its repository in-handler, and owns tz-normalization + PATCH diffing + commit — the scattered off-pattern case among its peers.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Extract WeakPointOut/WeakPointPatch to app/schemas/weak_points.py and push the patch/resolve mutation into the repository, so the route validates then delegates like its peers.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> seam: patch rules testable</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> route matches its peers</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> persistence policy leaves the handler</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-12" data-candidate="coupling-constants-params" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-12" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="coupling-constants-params" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Lift the fatigue/tissue coupling constants into EngineParameters</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">coupling-constants-params</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="coupling-constants-params" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/logic/state_update_v0.py:351-364</li><li>app/logic/state_update_v0.py:367-380</li><li>app/engine/parameters.py:15-58</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">~18 literals in function bodies<br>no version · no override</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">EngineParameters, versioned</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The coefficients mapping dose onto the safety-relevant fatigue/tissue impulse are inline literals with no version or override path, while their sibling dose params are centralized in EngineParameters.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Lift them into EngineParameters (fatigue_coupling/tissue_coupling/legacy_channel_weights) so they carry the same versioning and per-athlete override as dose_shape_six_by_modality.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> unblocks per-athlete fatigue tuning</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one home for the fatigue map</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> parity with the other half of the dose law</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-13" data-candidate="session-intensity-samples" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-13" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="session-intensity-samples" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Hoist ADR-0039 sample construction above its seam</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">session-intensity-samples</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="session-intensity-samples" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/logic/dose_engine_v0.py:93-169</li><li>app/services/state_service.py:689-816</li><li>app/logic/dose_routing.py:115-116</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">pure fn  &lt;-  130-line loop<br>to_failure x3</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one sample builder, one predicate</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The ADR-0039 session-I pipeline is split: a pure function under a 130-line service loop that determines its output, with to_failure re-derived in three places.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Hoist session_intensity_samples(groups, e1rm_denoms) and a shared is_to_failure predicate into the calibration/dose layer; the service hands rows to it instead of building samples inline.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> the ADR-0039 delivery path, testable</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> to_failure gets one home</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> sample contract leaves the ingest loop</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-14" data-candidate="planning-reschedule-service" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-14" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="planning-reschedule-service" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">api-contract</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Move the reschedule state machine into the service</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">planning-reschedule-service</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="planning-reschedule-service" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/api/v1/planning.py:99-134</li><li>app/api/v1/planning.py:51-79</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">handler: query+mutate+state-machine+commit</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">route -&gt; planning_service</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The PATCH planning handlers own the reschedule invariant (preserve original date on first move, mark RESCHEDULED) inline — domain logic in an HTTP handler with no service seam to unit-test.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Move the reschedule/ownership logic into planning_service.update_session/update_block (services already own commit); the route shrinks to validate -&gt; delegate -&gt; return.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> reschedule rule testable at a seam</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> route becomes thin</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> matches create_block/today</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-15" data-candidate="e1rm-denominator-resolver" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-15" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="e1rm-denominator-resolver" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">One canonical current-e1RM resolver for the dose invariant</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">e1rm-denominator-resolver</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">4 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="e1rm-denominator-resolver" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/services/prescription_service.py:150-176</li><li>app/services/state_service.py:820-863</li><li>app/services/dashboard_service.py:46-66</li><li>app/services/dose_routing_shadow_service.py:25-76</li></ul>
+        <div style="margin:14px 0;border-radius:12px;padding:12px;background:var(--surface-1);border:1px solid var(--border)" data-graph='{"direction": "LR", "nodes": [{"name": "prescription _current_e1rm"}, {"name": "state prelog_denominators"}, {"name": "dashboard latest_by_code"}, {"name": "shadow _e1rm_by_exercise_key", "role": "leak"}, {"name": "I = load / e1RM_pre"}], "edges": [{"from": 0, "to": 4}, {"from": 1, "to": 4}, {"from": 2, "to": 4}, {"from": 3, "to": 4, "label": "divergent query", "role": "leak"}]}'></div>
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">4 services + 2 dose paths<br>each re-queries &#x27;current e1RM&#x27;</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one resolver, one key map</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">&#x27;Latest valid e1RM/denominator per code/exercise&#x27; is reimplemented across four services and both dose paths; a safety-relevant ADR-0056 invariant is enforced by prose, not structure.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">One resolver owning the validity filter, ordering, and canonical id:/name: key map; the four callers and both dose paths project from it.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> turns a prose invariant structural</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> protects the ADR-0054 calibration</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> deletes the shadow bespoke resolver</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-16" data-candidate="guest-preview-split" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-16" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="guest-preview-split" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">web</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Split guest previews and share the tissue body-map</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">guest-preview-split</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="guest-preview-split" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>web/src/perflab/screens/TwinScreen.tsx:385-441</li><li>web/src/perflab/screens/TwinScreen.tsx:646-682</li><li>web/src/perflab/screens/PlanningScreen.tsx:340-471</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">TissueBody SVG x2<br>two render trees per file</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one body-map component</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Guest/sim render trees are co-located with the authed bodies (correctly token-gated, not an honesty risk), and the tissue body-map SVG is copy-pasted between live and sim, so a visual fix must be made twice.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Split guest previews into sibling files and extract the shared tissue body-map into one presentational component fed by a value-getter (the authed side already parameterises via getT).</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one place to fix the body-map</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> trust boundaries separate files</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> screens shrink to their live path</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-17" data-candidate="overview-view-model" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--serious);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-17" style="text-decoration:none;background:color-mix(in srgb, var(--serious) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="overview-view-model" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">web</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Extract a view-model from the Overview god-component</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">overview-view-model</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">design</span>
+        </div>
+        <div data-meter="overview-view-model" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>web/src/perflab/screens/OverviewScreen.tsx:37</li><li>web/src/perflab/screens/OverviewScreen.tsx:330-411</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">OverviewScreen 625 lines<br>fetch+map+sim+render</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">useOverviewModel + typed cards</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">OverviewScreen interleaves fetching, loose-typed PrescDict reads, sim-vs-real selection and presentation in one 625-line function with an invisible module-global flag — no seam to test what it renders.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Extract useOverviewModel(resources) returning a plain view-model and move PrescDict reads into the state adapter; cards take typed props and become independently testable.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> locality: one place to read a tile</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> view-model testable off-screen</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> kills the module-global flag</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-18" data-candidate="tissue-phi-passthrough" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--critical);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-18" style="text-decoration:none;background:color-mix(in srgb, var(--critical) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="tissue-phi-passthrough" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Carry per-exercise tissue phi through StressDose<span style="font-family:ui-monospace,Menlo,monospace;font-size:9.5px;font-weight:600;color:var(--critical);background:rgba(208,59,59,.1);border-radius:4px;padding:1px 6px;margin-left:8px">BLOCKED &middot; human decision</span></h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">tissue-phi-passthrough</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">2 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">blocked</span>
+        </div>
+        <div data-meter="tissue-phi-passthrough" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/logic/dose_engine_v0.py:345-357</li><li>app/logic/state_update_v0.py:367-380</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">phi_tissue computed then dropped<br>tissue re-derived off label</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">phi_tissue passed through</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The dose engine aggregates real per-exercise tissue phi then throws it away, so the state update reconstructs tissue from the lossy session modality — and the fallback branch leaves phi_tissue unset.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Carry aggregated phi_tissue through StressDose and have tissue_impulse_from_dose consume it, closing the loop the dose engine already opened and making the fallback symmetric.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> aligns live tissue with ADR-0054</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> fallback branch becomes symmetric</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> exercise-aware tissue, not label</li></ul>
+        <div style="margin-top:12px;background:rgba(208,59,59,.07);border:1px solid rgba(208,59,59,.25);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink-secondary)"><span style="color:var(--critical);font-weight:700">&#9888; decision</span> &middot; numerical-correctness: tissue feeds safety gates; sign-off needed before changing tissue impulses</div>
+      </div>
+    </article>
+    <article id="candidate-19" data-candidate="resource-status-hook" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--good);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-19" style="text-decoration:none;background:color-mix(in srgb, var(--good) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="resource-status-hook" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">web</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Push resource status into the shared hook</h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">resource-status-hook</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">direct-fix</span>
+        </div>
+        <div data-meter="resource-status-hook" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>web/src/perflab/hooks/useAuthedResource.ts:18-53</li><li>web/src/perflab/screens/PlanningScreen.tsx:113-116</li><li>web/src/perflab/screens/ObjectivesScreen.tsx:303-338</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">{data,loading,error}<br>guard + notice copied 5x</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">status hook + one renderer</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">useAuthedResource is shallow on the states that matter, so every screen re-hand-rolls loading/empty/error with the same workaround comment and 5+ near-identical notice components that subtly diverge.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Push a real status (&#x27;idle&#x27;|&#x27;loading&#x27;|&#x27;success&#x27;|&#x27;empty&#x27;|&#x27;error&#x27;) into the hook and add one shared ResourceState renderer; screens shrink to the success branch.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one disambiguation, N screens</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> notice styled once</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> removes error/empty divergence</li></ul>
+        
+      </div>
+    </article>
+    <article id="candidate-20" data-candidate="session-fallback-phi" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--critical);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-20" style="text-decoration:none;background:color-mix(in srgb, var(--critical) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="session-fallback-phi" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">One conservative session-fallback phi helper<span style="font-family:ui-monospace,Menlo,monospace;font-size:9.5px;font-weight:600;color:var(--critical);background:rgba(208,59,59,.1);border-radius:4px;padding:1px 6px;margin-left:8px">BLOCKED &middot; human decision</span></h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">session-fallback-phi</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">blocked</span>
+        </div>
+        <div data-meter="session-fallback-phi" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/logic/dose_engine_v0.py:349-353</li><li>app/logic/dose_routing.py:198-202</li><li>app/logic/state_update_v0.py:371-375</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">fallback phi x4<br>0.55/0.75  vs  0.5/0.65</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one versioned helper</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">The conservative session-modality phi fallback is open-coded at four sites with divergent magic constants, so a session&#x27;s fatigue base and its tissue routing use two different fallback shapes.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">One session_fallback_phi(log) helper owning the skill/impact anchors as named versioned constants that all four callers invoke.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one definition, no drift</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> fatigue and tissue share one shape</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> anchors become named constants</li></ul>
+        <div style="margin-top:12px;background:rgba(208,59,59,.07);border:1px solid rgba(208,59,59,.25);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink-secondary)"><span style="color:var(--critical);font-weight:700">&#9888; decision</span> &middot; numerical-correctness: which anchor (0.5 vs 0.55, 0.65 vs 0.75) becomes canonical</div>
+      </div>
+    </article>
+    <article id="candidate-21" data-candidate="interference-double-count" style="background:var(--surface-1);border:1px solid var(--border);border-left:3px solid var(--critical);border-radius:16px;overflow:hidden;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12);display:grid;grid-template-columns:64px 1fr">
+      <a href="#candidate-21" style="text-decoration:none;background:color-mix(in srgb, var(--critical) 9%, var(--surface-1));display:flex;flex-direction:column;align-items:center;padding:16px 0;gap:8px">
+        <span data-rank="interference-double-count" style="font-family:Georgia,serif;font-size:40px;font-weight:600;line-height:1">&middot;</span>
+        <span style="font-family:ui-monospace,Menlo,monospace;font-size:9px;letter-spacing:.1em;color:var(--ink-muted)">RANK</span>
+        <span style="writing-mode:vertical-rl;font-family:ui-monospace,Menlo,monospace;font-size:10px;letter-spacing:.12em;color:var(--ink-muted);margin-top:6px">engine</span>
+      </a>
+      <div style="padding:18px 20px">
+        <h3 style="font-family:Georgia,serif;font-size:21px;font-weight:600;letter-spacing:-.015em;margin:0;color:var(--ink-primary)">Apply concurrent interference exactly once<span style="font-family:ui-monospace,Menlo,monospace;font-size:9.5px;font-weight:600;color:var(--critical);background:rgba(208,59,59,.1);border-radius:4px;padding:1px 6px;margin-left:8px">BLOCKED &middot; human decision</span></h3>
+        <div style="display:flex;flex-wrap:wrap;gap:6px;margin:10px 0 4px">
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">interference-double-count</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">3 files</span>
+          <span style="font-family:ui-monospace,Menlo,monospace;font-size:10px;border:1px solid var(--hairline);border-radius:4px;padding:1px 6px;color:var(--ink-secondary)">blocked</span>
+        </div>
+        <div data-meter="interference-double-count" style="max-width:340px;margin:12px 0"></div>
+        <ul style="list-style:none;padding:0;margin:8px 0;font-family:ui-monospace,Menlo,monospace;font-size:12px;color:var(--ink-secondary);line-height:1.6"><li>app/logic/state_update_v0.py:497-524</li><li>app/logic/state_update_v0.py:403-455</li><li>app/logic/dose_engine_v0.py:422-430</li></ul>
+        
+        <div style="background:var(--page);border:1px solid var(--hairline);border-radius:12px;padding:16px;display:grid;grid-template-columns:1fr 40px 1fr;align-items:center;gap:8px;margin:14px 0">
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">Before</div>
+        <div style="border:1px solid var(--hairline);border-radius:8px;padding:12px;background:var(--surface-1);font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary);line-height:1.5">interference x2 blocks<br>two drives, contested seam</div>
+      </div>
+      <div style="display:flex;justify-content:center"><div style="width:28px;height:28px;border-radius:999px;background:var(--accent);color:#fff;display:flex;align-items:center;justify-content:center;font-size:15px">&rarr;</div></div>
+      <div>
+        <div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:8px">After &middot; deep</div>
+        <div class="deep" style="border-radius:8px;padding:12px;font-family:ui-monospace,Menlo,monospace;font-size:11px;line-height:1.5;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.2)">one accrual, interference once</div>
+      </div>
+    </div>
+        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;border-top:1px solid var(--hairline);padding-top:12px;margin-top:12px">
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Problem</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Concurrent-training interference is applied in two separate capacity-moving blocks inside one update, each multiplying by the same term — to reason about net strength delta you must hold four files in your head, and it may double-count.</div></div>
+          <div><div style="font-family:ui-monospace,Menlo,monospace;font-size:9px;text-transform:uppercase;letter-spacing:.08em;color:var(--ink-muted);margin-bottom:4px">Solution</div><div style="font-family:Georgia,serif;font-size:14px;color:var(--ink-secondary);line-height:1.55">Consolidate strength/hypertrophy accrual into one apply_strength_adaptation taking both drives, applying interference exactly once per axis — the single place to read for &#x27;session -&gt; strength&#x27;.</div></div>
+        </div>
+        <ul style="list-style:none;padding:0;margin:12px 0 0;font-family:ui-monospace,Menlo,monospace;font-size:11px;color:var(--ink-secondary)"><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> one place to read strength delta</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> interference applied once</li><li style="margin:2px 0"><span style="color:var(--good);font-weight:700">+</span> resolves the contested seam</li></ul>
+        <div style="margin-top:12px;background:rgba(208,59,59,.07);border:1px solid rgba(208,59,59,.25);border-radius:8px;padding:10px 12px;font-size:13px;color:var(--ink-secondary)"><span style="color:var(--critical);font-weight:700">&#9888; decision</span> &middot; physiology/policy: whether both drives should each carry interference is a numerical-correctness call, not a mechanical merge</div>
+      </div>
+    </article>
+  </section>
+
+  <section id="top-recommendation">
+    <div style="background:var(--surface-1);border:1px solid var(--border);border-left:4px solid var(--good);border-radius:16px;padding:22px 24px;box-shadow:0 1px 2px rgba(11,11,11,.04),0 8px 24px -12px rgba(11,11,11,.12)">
+      <div style="font-family:ui-monospace,Menlo,monospace;font-size:10px;text-transform:uppercase;letter-spacing:.09em;color:var(--good)">Top recommendation &middot; sequencing</div>
+      <h2 style="font-family:Georgia,serif;font-size:24px;font-weight:600;margin:6px 0 0">Run the Strong tier first, then the honesty fix, then converge the engine</h2>
+      <div style="font-family:Georgia,serif;font-size:15px;color:var(--ink-secondary);line-height:1.6;margin-top:10px">
+        The formula puts the cheap, certain wins on top &mdash; <a href="#candidate-1">delete the readiness decoy</a>, <a href="#candidate-4">delete the dead display loader</a>, <a href="#candidate-3">pin the confidence Literal</a>. These clear noise before the substantive work.
+        The highest-<em>value</em> item for this workstream is <a href="#candidate-2">History fixtures</a> &mdash; signed-in athletes still see fabricated VO&#8322;max and readiness; it ranks just under the deletions only because it carries a touch more risk.
+        The engine convergence work &mdash; <a href="#candidate-20">session-fallback phi</a>, <a href="#candidate-18">tissue phi pass-through</a>, <a href="#candidate-21">interference double-count</a> &mdash; is genuinely high-leverage but moves numbers feeding <em>safety gates</em>, so all three are gated behind a human numerical-correctness decision and must not auto-run.
+      </div>
+    </div>
+  </section>
+
+</main>
+</body>
+</html>
