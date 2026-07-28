@@ -25,7 +25,7 @@
 
 import { Radar, type RadarAxis } from "../../viz";
 import { SectionLabel } from "../../ui";
-import type { CapacityState, StateHistorySnapshotRead } from "@/types";
+import type { CapacityState, ConfidenceStatus, StateHistorySnapshotRead } from "@/types";
 
 // ---- Five plotted axes: X_t field mapping + canonical ceilings ----
 // Ceilings are frontend presentation constants, deliberately independent of the
@@ -59,9 +59,25 @@ const TYPE_NAMES: Record<string, string> = {
 
 // The presentation policy owns the variance thresholds — we only narrow the
 // string the backend already resolved. Any unknown → the safe "insufficient".
-type ConfStatus = "established" | "provisional" | "insufficient";
+// The band is generated from the backend Literal (confidence_presentation
+// .ConfidenceStatus -> openapi.json -> types.gen.ts -> types.ts), so renaming a
+// value on the backend is a compile error here rather than a silent divergence.
+//
+// The RUNTIME check stays anyway, and deliberately: the type governs this build,
+// not the wire. Under SPA/backend version skew a response can carry a band this
+// build has never heard of, and rendering it as understood — and as
+// non-insufficient, which admits it to every derived summary — is worse than
+// degrading to the conservative default. KNOWN_BANDS is exhaustive over the
+// generated union, so a band added backend-side fails to compile until it is
+// handled here explicitly.
+type ConfStatus = ConfidenceStatus;
+const KNOWN_BANDS: Record<ConfidenceStatus, true> = {
+  established: true,
+  provisional: true,
+  insufficient: true,
+};
 function narrowStatus(s: string | undefined): ConfStatus {
-  return s === "established" || s === "provisional" ? s : "insufficient";
+  return s != null && Object.prototype.hasOwnProperty.call(KNOWN_BANDS, s) ? (s as ConfStatus) : "insufficient";
 }
 
 const clamp01 = (n: number) => Math.max(0, Math.min(1, n));

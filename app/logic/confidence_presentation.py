@@ -15,7 +15,15 @@ over the axes material to a given recommendation (deferred to the consuming surf
 
 from __future__ import annotations
 
+from typing import Final, Literal
+
 POLICY_VERSION = "confidence_presentation_policy_v1"
+
+#: The canonical certainty band. Declared once, here, beside the function that
+#: derives it — every schema that carries a band references THIS, so OpenAPI emits
+#: a real enum instead of a bare ``string`` and the web consumes the generated
+#: union rather than re-declaring the values by hand.
+ConfidenceStatus = Literal["established", "provisional", "insufficient"]
 
 # Thresholds on the engine's compressed relative variance scale (measured ≈ 0.08,
 # weak prior ≈ 1.0, cap = 1.5). An axis shrunk by a benchmark is "established"; a
@@ -23,12 +31,12 @@ POLICY_VERSION = "confidence_presentation_policy_v1"
 ESTABLISHED_MAX_VARIANCE = 0.35
 PROVISIONAL_MAX_VARIANCE = 1.05
 
-STATUS_ESTABLISHED = "established"
-STATUS_PROVISIONAL = "provisional"
-STATUS_INSUFFICIENT = "insufficient"
+STATUS_ESTABLISHED: Final[ConfidenceStatus] = "established"
+STATUS_PROVISIONAL: Final[ConfidenceStatus] = "provisional"
+STATUS_INSUFFICIENT: Final[ConfidenceStatus] = "insufficient"
 
 
-def confidence_status(variance: float) -> str:
+def confidence_status(variance: float) -> ConfidenceStatus:
     """Derive the certainty band from a live per-axis variance (only)."""
     if variance <= ESTABLISHED_MAX_VARIANCE:
         return STATUS_ESTABLISHED

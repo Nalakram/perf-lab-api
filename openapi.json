@@ -145,6 +145,11 @@
           "confidence_status": {
             "anyOf": [
               {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
                 "type": "string"
               },
               {
@@ -3005,6 +3010,11 @@
           "overall_confidence": {
             "anyOf": [
               {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
                 "type": "string"
               },
               {
@@ -4555,6 +4565,11 @@
           },
           "capacity_confidence_status": {
             "additionalProperties": {
+              "enum": [
+                "established",
+                "provisional",
+                "insufficient"
+              ],
               "type": "string"
             },
             "description": "Per-capacity-axis certainty band (established | provisional | insufficient), derived from this snapshot's own capacity_confidence variance. All 8 capacity axes, even those the Twin does not plot.",

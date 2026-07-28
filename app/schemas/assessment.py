@@ -5,6 +5,8 @@ from datetime import datetime
 
 from pydantic import BaseModel
 
+from app.logic.confidence_presentation import ConfidenceStatus
+
 
 class AssessmentBenchmarkCard(BaseModel):
     code: str
@@ -19,7 +21,7 @@ class AssessmentBenchmarkCard(BaseModel):
     measures_axes: list[str]
     # Current certainty of the measured axes, from live variance only (ADR-0059);
     # null when the twin has no state yet (a fresh onramp).
-    confidence_status: str | None
+    confidence_status: ConfidenceStatus | None
     last_observed_at: datetime | None
     eligible: bool
     recommended: bool
