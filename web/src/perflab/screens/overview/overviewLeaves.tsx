@@ -77,7 +77,7 @@ export function OverviewHeader({
   actions?: ReactNode;
 }) {
   return (
-    <header className="flex items-start justify-between gap-5">
+    <header className="flex flex-wrap items-start justify-between gap-5">
       <div>
         <h1 className="m-0 text-[25px] font-bold leading-none tracking-[-0.02em] text-ink">
           {greetingPrefix()}, {name}

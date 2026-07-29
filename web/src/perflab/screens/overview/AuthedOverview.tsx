@@ -140,8 +140,8 @@ export function AuthedOverview() {
 
       <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_320px]">
         <Card className="p-6">
-          <div className="flex items-start gap-6">
-            <div className="w-[300px] flex-none">
+          <div className="flex flex-col gap-6 sm:flex-row sm:items-start">
+            <div className="w-full sm:w-[300px] sm:flex-none">
               <ReadinessBlock readiness={readiness} />
               <TrendBlock trend={trend} />
             </div>
