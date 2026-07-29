@@ -168,9 +168,9 @@ export function GuestTwinPreview() {
             ))}
           </div>
         ) : (
-          <div className="grid grid-cols-1 items-center gap-[26px] lg:grid-cols-[280px_1fr_250px]">
+          <div className="grid grid-cols-1 items-center gap-[26px] lg:grid-cols-[330px_1fr_250px]">
             <div>
-              <Radar axes={radarAxes} baseline={radarBaseline} size={200} className="mx-auto block h-auto w-full max-w-[220px]" />
+              <Radar axes={radarAxes} baseline={radarBaseline} size={200} className="mx-auto block h-auto w-full max-w-[300px]" />
               <div className="mt-2 flex justify-center gap-[18px] text-[10px] font-medium leading-none text-mute">
                 <span><span className="mr-[5px] inline-block h-[3px] w-[12px] rounded-[2px] bg-ac align-middle" />now</span>
                 <span><span className="mr-[5px] inline-block w-[12px] border-t-[1.5px] border-dashed border-white/50 align-middle" />block start</span>

@@ -219,9 +219,9 @@ function RadarPanel({ axes, displayableAxes, showDelta }: { axes: AxisRow[]; dis
   const baseline = axes.map((a) => a.startRaw);
 
   return (
-    <div className="grid grid-cols-1 items-center gap-[26px] lg:grid-cols-[280px_1fr_250px]">
+    <div className="grid grid-cols-1 items-center gap-[26px] lg:grid-cols-[330px_1fr_250px]">
       <div>
-        <Radar axes={radarAxes} baseline={showDelta ? baseline : undefined} size={200} className="mx-auto block h-auto w-full max-w-[220px]" />
+        <Radar axes={radarAxes} baseline={showDelta ? baseline : undefined} size={200} className="mx-auto block h-auto w-full max-w-[300px]" />
         <div className="mt-2 flex flex-wrap justify-center gap-x-[18px] gap-y-1 text-[10px] font-medium leading-none text-mute">
           <span><span className="mr-[5px] inline-block h-[3px] w-[12px] rounded-[2px] bg-ac align-middle" />now</span>
           {showDelta && (

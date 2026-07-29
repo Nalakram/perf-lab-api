@@ -32,8 +32,11 @@ function BlockCard({ right, children }: { right?: React.ReactNode; children: Rea
 const fetchMacrocycles = (token: string): Promise<MacrocycleRead[]> => listMacrocycles(token);
 
 export function AuthedSidebarBlock() {
-  const { actions } = usePerfLab();
-  const resource = useAuthedResource<MacrocycleRead[]>(fetchMacrocycles, []);
+  const { state, actions } = usePerfLab();
+  // The sidebar lives outside the screen swap (AppShell.tsx), so it never unmounts:
+  // without the refresh key in the deps, a program created mid-session would leave
+  // this card claiming "No active block" until a hard reload.
+  const resource = useAuthedResource<MacrocycleRead[]>(fetchMacrocycles, [state.macrocyclesRefreshKey]);
   const view = sidebarBlockView(resource);
 
   switch (view.kind) {
