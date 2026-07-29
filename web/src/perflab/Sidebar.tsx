@@ -21,7 +21,10 @@ const I = (d: ReactNode, sw = 1.7) => (
   </svg>
 );
 
-const ICONS: Record<string, ReactNode> = {
+// Keyed by Screen, not string: the `assess` entry silently lost its icon when the
+// screen was renamed from `field`, because a Record<string, …> lookup for a missing
+// key just renders nothing. Typing it to Screen makes the next rename a tsc error.
+const ICONS: Record<Screen, ReactNode> = {
   overview: I(
     <>
       <rect x="3" y="3" width="7" height="7" rx="1.5" />
@@ -30,7 +33,7 @@ const ICONS: Record<string, ReactNode> = {
       <rect x="14" y="14" width="7" height="7" rx="1.5" />
     </>,
   ),
-  field: I(<path d="M3 12h4l3 8 4-16 3 8h4" />),
+  assess: I(<path d="M3 12h4l3 8 4-16 3 8h4" />),
   twin: I(
     <>
       <path d="M12 2 4 7v10l8 5 8-5V7z" />

@@ -21,12 +21,19 @@ export interface RadarProps {
   size?: number;
   /** Number of concentric grid rings. Default 4. */
   levels?: number;
+  /**
+   * Extra viewBox margin, in user units, reserved for the spoke labels outside
+   * the ring. An svg root clips to its viewport, so without this the two
+   * near-horizontal spokes lose characters ("Glyco" → "Glyc"): at size=200 a
+   * horizontal label starts only 22 units from the edge but needs ~31.
+   */
+  labelPad?: number;
   /** Value polygon color. Defaults to the accent (the "now" emphasis). */
   color?: string;
   className?: string;
 }
 
-export function Radar({ axes, baseline, size = 240, levels = 4, color, className }: RadarProps) {
+export function Radar({ axes, baseline, size = 240, levels = 4, labelPad = 26, color, className }: RadarProps) {
   const { accent, chrome, colors } = useVizTheme();
   const c = color ?? accent;
   const n = axes.length;
@@ -38,7 +45,12 @@ export function Radar({ axes, baseline, size = 240, levels = 4, color, className
   const frac = axes.map((a) => Math.max(0, Math.min(1, a.max ? a.value / a.max : 0)));
 
   return (
-    <svg viewBox={`0 0 ${size} ${size}`} className={className} role="img" aria-label="Capacity radar">
+    <svg
+      viewBox={`${-labelPad} ${-labelPad} ${size + labelPad * 2} ${size + labelPad * 2}`}
+      className={className}
+      role="img"
+      aria-label="Capacity radar"
+    >
       {/* grid rings */}
       {Array.from({ length: levels }, (_, l) => (
         <polygon
