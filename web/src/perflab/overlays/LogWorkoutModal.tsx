@@ -3,46 +3,16 @@ import { useEffect, useState } from "react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/auth/useAuth";
 import { getNextSession, listExercises, logWorkout, simulateDose } from "@/api/perfLabClient";
-import type { ApiError, Modality, WorkoutLog } from "@/types";
+import type { ApiError } from "@/types";
 import { usePerfLab } from "../store";
 import { MetricBar } from "../ui";
 import { COLORS, DOSE_NAMES, doseBarColor, PRESETS, projectLogDose } from "../sim";
 import { SetBuilder } from "./SetBuilder";
 import { deriveModality, groupsToSets, type SetGroup } from "./setBuilderLogic";
-
-/** Build a backend WorkoutLog from the modal's form state.
- *
- * When per-set groups are present (ADR-0045) they are the record: `sets` is sent,
- * the session modality is derived from them (the backend derives it too), and the
- * running-shaped session distance is dropped so the backend rolls it up from sets. */
-function buildWorkoutLog(
-  logType: string,
-  rpe: number,
-  durationMin: number,
-  distanceKm: number,
-  sleepQ: number,
-  mood: number,
-  setGroups: SetGroup[] = [],
-): WorkoutLog {
-  const sets = groupsToSets(setGroups);
-  const modality: Modality =
-    (sets.length ? deriveModality(setGroups) : null) ??
-    (logType === "strength" ? "Strength" : "Running");
-  // We send only what the form captures; the backend fills server-side defaults
-  // for omitted fields (is_benchmark, novelty, total_volume_load, …). `satisfies`
-  // still type-checks the fields we DO set against the contract; the cast covers
-  // the server-defaulted remainder.
-  return {
-    timestamp: new Date().toISOString(),
-    modality,
-    duration_minutes: durationMin,
-    session_rpe: rpe,
-    // Required by the backend; sourced from the morning check-in (1–5 scales).
-    sleep_quality: sleepQ,
-    life_stress_inverse: mood,
-    ...(sets.length ? { sets } : modality === "Running" ? { distance_meters: Math.round(distanceKm * 1000) } : {}),
-  } satisfies Partial<WorkoutLog> as WorkoutLog;
-}
+// #199: the request body is built in its own fixture-free module so the static
+// reachability guard (workoutLogBoundary.test.ts) can root there. This file cannot be
+// a root — it value-imports the fixture module `../sim` for its preview chrome below.
+import { buildWorkoutLog, checkinToWorkoutWellness } from "./workoutLogBody";
 
 export function LogWorkoutModal() {
   const { state, actions } = usePerfLab();
@@ -53,12 +23,15 @@ export function LogWorkoutModal() {
   const [sets, setSets] = useState<SetGroup[]>([]);
 
   const { logOpen, logType, rpe, durationMin, distanceKm } = state;
-  const { sleepQ, mood } = state.checkin;
+  // The ONLY read of check-in state on this path, and it is null-preserving: an
+  // un-entered slider stays `null` here and is omitted from the body, never defaulted.
+  const wellness = checkinToWorkoutWellness(state.checkin);
 
   const derivedModality = sets.length ? deriveModality(sets) : null;
   // A stable key over just the fields the dose depends on, so the preview effect
   // re-runs when a set's load/reps/rpe change without chasing object identity.
   const setsKey = JSON.stringify(groupsToSets(sets));
+  const { sleepQuality, lifeStressInverse } = wellness;
 
   // On open, best-effort pre-fill from today's prescription so a prescribed lift's
   // suggested kg (ADR-0045) lands in the log. Resolves each exercise against the
@@ -107,7 +80,7 @@ export function LogWorkoutModal() {
     }
     let cancelled = false;
     const id = window.setTimeout(() => {
-      simulateDose(buildWorkoutLog(logType, rpe, durationMin, distanceKm, sleepQ, mood, sets))
+      simulateDose(buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets))
         .then((d) => {
           if (cancelled) return;
           const s = d.dose_six;
@@ -124,7 +97,7 @@ export function LogWorkoutModal() {
     // setsKey is a stable serialization of `sets` — it captures every set field the
     // dose depends on without re-running on unrelated object-identity changes.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [logOpen, logType, rpe, durationMin, distanceKm, sleepQ, mood, setsKey]);
+  }, [logOpen, logType, rpe, durationMin, distanceKm, sleepQuality, lifeStressInverse, setsKey]);
 
   if (!state.logOpen) return null;
 
@@ -142,7 +115,7 @@ export function LogWorkoutModal() {
     setApplyError(null);
     try {
       const sv = await logWorkout(
-        buildWorkoutLog(logType, rpe, durationMin, distanceKm, sleepQ, mood, sets),
+        buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets),
         auth.token,
       );
       actions.cacheTwinState(sv);

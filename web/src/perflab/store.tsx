@@ -203,7 +203,15 @@ export function initialState(): PerfLabState {
     explainKey: null,
     capView: "bars",
     sim: { volume: 56, intensity: "balanced", weeks: 8, recovery: "standard", goal: DEFAULT_GOAL },
-    checkin: { hrv: 64, sleepH: 7.5, sleepQ: 4, rhr: 52, soreness: "mild", mood: 4, stress: 2, done: false },
+    // #199: EVERY check-in field starts "not reported" (null). It used to be seeded
+    // with sample constants (hrv 64, sleepH 7.5, sleepQ 4, rhr 52, soreness "mild",
+    // mood 4, stress 2), and `sleepQ`/`mood` were read straight out of here by
+    // LogWorkoutModal and submitted to authenticated POST /v1/log-workout as if the
+    // athlete had reported them. Gating on `done` would not have fixed it: `done` is
+    // one boolean over six independent signals, so moving a single slider still
+    // submitted the other five seeds with `done === true`. The only representation of
+    // "unknown" that cannot be mistaken for a measurement is the absence of a value.
+    checkin: { hrv: null, sleepH: null, sleepQ: null, rhr: null, soreness: null, mood: null, stress: null, done: false },
     checkinOpen: false,
     feedbackOpen: false,
     feedbackApplied: false,

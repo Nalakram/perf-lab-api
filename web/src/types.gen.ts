@@ -1684,6 +1684,80 @@ export interface components {
             detail?: components["schemas"]["ValidationError"][];
         };
         /**
+         * HumanFactorGain
+         * @description The human-factor (wellness) gain applied to the six-axis dose (ADR-0049).
+         *
+         *     ``value`` is the product of the per-input penalties, so it lies in ``[1, inf)``: it
+         *     scales the dose **up** and the adaptation contribution **down**. ``source`` names the
+         *     weakest rung any input took, so a dose computed from a real check-in is
+         *     distinguishable from one computed with a labelled neutral for missing wellness.
+         */
+        HumanFactorGain: {
+            /**
+             * Confidence
+             * @description Mean of the per-input confidences: 1.0 all reported, 0.0 none.
+             * @default 0
+             */
+            confidence: number;
+            /** Inputs */
+            inputs?: components["schemas"]["HumanFactorInput"][];
+            /**
+             * Model Version
+             * @default
+             */
+            model_version: string;
+            /**
+             * Source
+             * @description reported (every input measured) | partial_neutral_missing (some measured) | neutral_missing (none measured).
+             * @default neutral_missing
+             */
+            source: string;
+            /**
+             * Value
+             * @default 1
+             */
+            value: number;
+        };
+        /**
+         * HumanFactorInput
+         * @description One wellness input to the dose human-factor gain, with provenance (ADR-0049).
+         *
+         *     ``value`` is the athlete's report on the 1–10 scale, or ``None`` when no check-in
+         *     exists for the session. Following the ADR-0039 ``neutral_missing`` precedent, an
+         *     unknown input is **labelled**, not silently filled: it contributes the identity
+         *     penalty ``1.0`` (no penalty at all) and carries ``confidence = 0.0``, so a consumer
+         *     can always tell "unknown" from "the athlete reported an average day".
+         */
+        HumanFactorInput: {
+            /**
+             * Confidence
+             * @description 1.0 for a reported value, 0.0 for a labelled neutral_missing.
+             * @default 0
+             */
+            confidence: number;
+            /**
+             * Name
+             * @description sleep_quality | life_stress_inverse
+             */
+            name: string;
+            /**
+             * Penalty
+             * @description Multiplier this input contributed to the gain; always >= 1.0.
+             * @default 1
+             */
+            penalty: number;
+            /**
+             * Source
+             * @description Rung taken: reported | neutral_missing
+             */
+            source: string;
+            /**
+             * Value
+             * @description Athlete report on the 1–10 scale, or null when unknown.
+             */
+            value?: number | null;
+        };
+        /**
          * IntensityContribution
          * @description One exercise's contribution to the session external intensity (ADR-0039).
          *
@@ -2687,6 +2761,7 @@ export interface components {
             d_struct_signal: number;
             dose_six?: components["schemas"]["StressDoseSix"];
             external_intensity?: components["schemas"]["ExternalIntensity"] | null;
+            human_factor_gain?: components["schemas"]["HumanFactorGain"] | null;
         };
         /**
          * StressDoseSix
@@ -3162,10 +3237,9 @@ export interface components {
             is_benchmark: boolean;
             /**
              * Life Stress Inverse
-             * @description 1 = Very high life stress, 10 = No life stress
-             * @default 5
+             * @description 1 = Very high life stress, 10 = No life stress. null = not reported: no dose penalty is applied and the dose is labelled neutral_missing with zero human-factor confidence (ADR-0049).
              */
-            life_stress_inverse: number;
+            life_stress_inverse?: number | null;
             /**
              * Modality
              * @enum {string}
@@ -3191,9 +3265,9 @@ export interface components {
             sets?: components["schemas"]["WorkoutSetEntry"][];
             /**
              * Sleep Quality
-             * @default 5
+             * @description 1 = Worst sleep, 10 = Best sleep. null = not reported: no dose penalty is applied and the dose is labelled neutral_missing with zero human-factor confidence (ADR-0049). Never imputed to a midpoint.
              */
-            sleep_quality: number;
+            sleep_quality?: number | null;
             /**
              * Timestamp
              * Format: date-time

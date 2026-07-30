@@ -17,7 +17,9 @@ Covered:
 - clearance: unknown ⇒ exactly the identity multiplier, and differs from a reported 5.0
 - ``0`` and ``None`` are distinguishable at every consumer
 """
+import json
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -389,3 +391,248 @@ async def test_persisted_dose_snapshot_labels_the_wellness_gap(async_db):
     assert snapshot["human_factor_gain"]["source"] == "neutral_missing"
     assert snapshot["human_factor_gain"]["confidence"] == 0.0
     assert snapshot["human_factor_gain"]["value"] == 1.0
+
+
+# ── Contract: optional-and-nullable is NOT the same as defaulted ─────────────
+#
+# These are different failure modes, and a test that only checks "the field is
+# optional" passes on the DEFECTIVE shape: `sleep_quality: float = Field(5.0, ...)`
+# is also optional in the request. What distinguishes them is what absence MEANS —
+# `None` versus a fabricated number — and whether the published contract advertises
+# a default. The last assertion is the one that would have caught the original bug
+# from the outside, without reading a line of Python.
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
+_WELLNESS_FIELDS = ("sleep_quality", "life_stress_inverse")
+
+
+def _workout_log_schema(source: dict) -> dict:
+    return source["components"]["schemas"]["WorkoutLog"]
+
+
+def _live_openapi() -> dict:
+    from app.main import app
+
+    return app.openapi()
+
+
+def _committed_openapi() -> dict:
+    return json.loads((_REPO_ROOT / "openapi.json").read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("field", _WELLNESS_FIELDS)
+def test_absence_yields_none_not_a_number(field: str):
+    """Optional-and-nullable: omitting it produces ``None``, never a float."""
+    value = getattr(_log(), field)
+    assert value is None
+    assert not isinstance(value, float)
+
+
+@pytest.mark.parametrize("field", _WELLNESS_FIELDS)
+def test_explicit_null_is_accepted_and_yields_none(field: str):
+    log = WorkoutLog.model_validate({
+        "timestamp": datetime(2026, 1, 1, 9, 0, tzinfo=UTC),
+        "modality": "Strength",
+        "duration_minutes": 60.0,
+        "session_rpe": 7.0,
+        field: None,
+    })
+    assert getattr(log, field) is None
+
+
+@pytest.mark.parametrize("field", _WELLNESS_FIELDS)
+def test_supplied_value_still_enforces_the_range(field: str):
+    assert getattr(_log(**{field: 1.0}), field) == 1.0
+    assert getattr(_log(**{field: 10.0}), field) == 10.0
+    with pytest.raises(ValidationError):
+        _log(**{field: 10.5})
+    with pytest.raises(ValidationError):
+        _log(**{field: 0.5})
+
+
+@pytest.mark.parametrize("field", _WELLNESS_FIELDS)
+def test_zero_is_rejected_not_silently_treated_as_unknown(field: str):
+    """``0`` is out of domain. It must raise, not become a stand-in for missing."""
+    with pytest.raises(ValidationError):
+        _log(**{field: 0.0})
+    assert getattr(_log(), field) is None  # the only spelling of unknown
+
+
+@pytest.mark.parametrize("source_name,loader", [("live app", _live_openapi), ("committed openapi.json", _committed_openapi)])
+@pytest.mark.parametrize("field", _WELLNESS_FIELDS)
+def test_published_contract_carries_no_default_for_wellness(field: str, source_name: str, loader):
+    """THE OUTSIDE-IN CATCH: the contract must not advertise a default.
+
+    Checked against BOTH the live app schema and the committed ``openapi.json``. The
+    live check catches a Python-side regression the instant it happens; the committed
+    check catches a stale artefact being shipped to the frontend. A regression that
+    restored ``Field(5.0, ...)`` fails the live arm even if nobody regenerated the file.
+    """
+    schema = _workout_log_schema(loader())
+    prop = schema["properties"][field]
+    assert "default" not in prop, (
+        f"{source_name}: WorkoutLog.{field} advertises a default ({prop.get('default')!r}). "
+        "A defaulted field is not the same as an optional-and-nullable one — absence must "
+        "mean unknown, not a fabricated value (ADR-0049)."
+    )
+    assert field not in schema.get("required", []), f"{source_name}: {field} must stay optional"
+    # Optional-and-NULLABLE: the union must actually admit null.
+    assert {"type": "null"} in prop["anyOf"], (
+        f"{source_name}: WorkoutLog.{field} must admit null, not merely be omittable"
+    )
+    numeric = [b for b in prop["anyOf"] if b.get("type") == "number"]
+    assert numeric and numeric[0]["minimum"] == 1.0 and numeric[0]["maximum"] == 10.0, (
+        f"{source_name}: the 1-10 bounds must survive on the non-null branch"
+    )
+
+
+# ── End to end: the gap survives every layer, request → disk → engine ────────
+
+@pytest.mark.asyncio
+async def test_no_checkin_stays_unknown_from_request_to_disk_to_engine(http_client, async_db):
+    """THE WHOLE CHAIN, IN ONE TEST, for the no-check-in case (#199).
+
+    The original defect survived precisely because every layer looked locally
+    reasonable. So this asserts each link explicitly, and reads the row BACK FROM THE
+    DATABASE rather than inferring persistence from the request or the model:
+
+        request OMITS both keys
+          -> the validated Pydantic model holds None (not 5.0, not 0)
+          -> the persisted row holds SQL NULL
+          -> the engine emits the identity contribution + missing provenance
+
+    Both field names are asserted by name. ``life_stress_inverse`` is the one a
+    half-done fix leaves broken, because the frontend calls it ``mood``.
+    """
+    email = "chain-nocheckin@example.com"
+    reg = await http_client.post("/auth/register", json={"email": email, "password": "testpass99"})
+    assert reg.status_code == 201, reg.text
+    tok = await http_client.post(
+        "/auth/token",
+        data={"username": email, "password": "testpass99"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    token = tok.json()["access_token"]
+
+    # LINK 1 — the request body genuinely omits both keys (this is what the frontend
+    # now sends when the athlete has not checked in; see workoutLogBody.ts).
+    body = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "modality": "Strength",
+        "duration_minutes": 60.0,
+        "session_rpe": 7.0,
+    }
+    assert "sleep_quality" not in body
+    assert "life_stress_inverse" not in body
+
+    # LINK 2 — the validated Pydantic model holds None, not a substituted number.
+    parsed = WorkoutLog.model_validate(body)
+    assert parsed.sleep_quality is None
+    assert parsed.life_stress_inverse is None
+    assert parsed.sleep_quality != 5.0 and parsed.life_stress_inverse != 5.0
+    assert parsed.sleep_quality != 0.0 and parsed.life_stress_inverse != 0.0
+
+    resp = await http_client.post(
+        "/v1/log-workout", json=body, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    # LINK 3 — the PERSISTED row is SQL NULL. Read back from the database.
+    row = (await async_db.execute(text(
+        "SELECT sleep_quality, life_stress_inverse, dose_snapshot FROM workout_logs "
+        "ORDER BY id DESC LIMIT 1"
+    ))).one()
+    assert row[0] is None, f"sleep_quality persisted as {row[0]!r}, expected SQL NULL"
+    assert row[1] is None, f"life_stress_inverse persisted as {row[1]!r}, expected SQL NULL"
+
+    # LINK 4 — the engine emitted the identity contribution and missing provenance.
+    hf = row[2]["human_factor_gain"]
+    assert hf["value"] == 1.0, "missing wellness must be the multiplicative identity"
+    assert hf["source"] == "neutral_missing"
+    assert hf["confidence"] == 0.0
+    by_name = {i["name"]: i for i in hf["inputs"]}
+    for field in _WELLNESS_FIELDS:
+        assert by_name[field]["value"] is None
+        assert by_name[field]["source"] == "neutral_missing"
+        assert by_name[field]["confidence"] == 0.0
+        assert by_name[field]["penalty"] == 1.0, "identity: no penalty for an unknown input"
+
+    # LINK 4b — identity on the RECOVERY side too, not only the dose.
+    p = default_parameters()
+    for axis in sorted(FatigueState.KEYS):
+        assert recovery_clearance_multiplier(axis, None, None, p) == pytest.approx(1.0)
+
+
+@pytest.mark.asyncio
+async def test_completed_checkin_persists_the_exact_values_both_fields(http_client, async_db):
+    """The other side of the matrix: a real check-in is stored verbatim, by field name."""
+    email = "chain-checkin@example.com"
+    await http_client.post("/auth/register", json={"email": email, "password": "testpass99"})
+    tok = await http_client.post(
+        "/auth/token",
+        data={"username": email, "password": "testpass99"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    token = tok.json()["access_token"]
+
+    # Deliberately different values, at opposite ends, so a transposed mapping fails.
+    body = {
+        "timestamp": datetime.now(UTC).isoformat(),
+        "modality": "Strength",
+        "duration_minutes": 60.0,
+        "session_rpe": 7.0,
+        "sleep_quality": 10.0,
+        "life_stress_inverse": 1.0,
+    }
+    resp = await http_client.post(
+        "/v1/log-workout", json=body, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+
+    row = (await async_db.execute(text(
+        "SELECT sleep_quality, life_stress_inverse, dose_snapshot FROM workout_logs "
+        "ORDER BY id DESC LIMIT 1"
+    ))).one()
+    assert row[0] == 10.0, "sleep_quality must persist verbatim"
+    assert row[1] == 1.0, "life_stress_inverse must persist verbatim (frontend `mood`)"
+
+    hf = row[2]["human_factor_gain"]
+    assert hf["source"] == "reported"
+    assert hf["confidence"] == 1.0
+    by_name = {i["name"]: i for i in hf["inputs"]}
+    assert by_name["sleep_quality"]["value"] == 10.0
+    assert by_name["life_stress_inverse"]["value"] == 1.0
+    # Measured behaviour preserved bit for bit: the worst-case life-stress report still
+    # penalises exactly as the pre-change equation says.
+    assert by_name["life_stress_inverse"]["penalty"] == pytest.approx(_expected_penalty(1.0))
+    assert by_name["sleep_quality"]["penalty"] == pytest.approx(_expected_penalty(10.0))
+
+
+def test_confidence_never_scales_the_dose():
+    """PROHIBITION (user ruling): confidence must not be smuggled back into the mean.
+
+    ``ΔS_applied != c_aggregate × ΔS_base``. An athlete who supplies less data must not
+    receive less training. Proven by construction: the six-axis dose for a log with NO
+    wellness (confidence 0.0) is identical to one whose reported wellness earns no
+    penalty (confidence 1.0). If confidence were ever multiplied into the dose, the
+    zero-confidence vector would shrink and these would diverge.
+    """
+    unknown = calculate_stress_dose(_log())
+    reported_no_penalty = calculate_stress_dose(_log(sleep_quality=10.0, life_stress_inverse=10.0))
+    assert unknown.human_factor_gain is not None
+    assert reported_no_penalty.human_factor_gain is not None
+    assert unknown.human_factor_gain.confidence == 0.0
+    assert reported_no_penalty.human_factor_gain.confidence == 1.0
+    for axis in _SIX_AXES:
+        assert getattr(unknown.dose_six, axis) == pytest.approx(
+            getattr(reported_no_penalty.dose_six, axis)
+        ), "confidence must scale nothing"
+    for legacy in ("d_met_systemic", "d_nm_peripheral", "d_nm_central",
+                   "d_struct_damage", "d_struct_signal"):
+        assert getattr(unknown, legacy) == pytest.approx(getattr(reported_no_penalty, legacy))
+    # Adaptation too: it is divided by the gain, never by the confidence.
+    for key in ("c_met_aerobic", "c_nm_force"):
+        if hasattr(unknown.adaptation_contribution, key):
+            assert getattr(unknown.adaptation_contribution, key) == pytest.approx(
+                getattr(reported_no_penalty.adaptation_contribution, key)
+            )
