@@ -1,6 +1,20 @@
 import { createContext } from "react";
 
 import type { OnboardRequest, ProfileRead, UserResponse } from "../types";
+import type { SessionUnavailableReason } from "./authFailure";
+
+/**
+ * The session is still valid and still stored — we just could not confirm it
+ * with the backend. Surfaced so the UI can say "we can't reach the server"
+ * and offer a retry, instead of silently ejecting the athlete.
+ */
+export type SessionUnavailable = {
+  reason: SessionUnavailableReason;
+  /** HTTP status when there was a response; `null` for network/offline/CORS. */
+  status: number | null;
+  /** Ready-to-render explanation (see `describeSessionUnavailable`). */
+  message: string;
+};
 
 export type AuthContextValue = {
   token: string | null;
@@ -14,6 +28,15 @@ export type AuthContextValue = {
   /** Local-only "try it" session: no token, nothing is persisted. */
   isGuest: boolean;
   isLoading: boolean;
+  /**
+   * Non-null when the last session check failed for a reason that is NOT an
+   * expired login. The token is deliberately KEPT — a deploy, a restart or a
+   * dropped connection must not sign anyone out. `null` whenever the session
+   * is confirmed (or when there is no session at all).
+   */
+  sessionUnavailable: SessionUnavailable | null;
+  /** Re-attempt the session check. Clears `sessionUnavailable` on success. */
+  retrySession: () => Promise<void>;
   onboardingPending: boolean;
   login: (email: string, password: string) => Promise<void>;
   register: (email: string, password: string) => Promise<void>;
