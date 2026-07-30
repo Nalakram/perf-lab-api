@@ -2120,6 +2120,87 @@
         "title": "HTTPValidationError",
         "type": "object"
       },
+      "HumanFactorGain": {
+        "description": "The human-factor (wellness) gain applied to the six-axis dose (ADR-0049).\n\n``value`` is the product of the per-input penalties, so it lies in ``[1, inf)``: it\nscales the dose **up** and the adaptation contribution **down**. ``source`` names the\nweakest rung any input took, so a dose computed from a real check-in is\ndistinguishable from one computed with a labelled neutral for missing wellness.",
+        "properties": {
+          "confidence": {
+            "default": 0.0,
+            "description": "Mean of the per-input confidences: 1.0 all reported, 0.0 none.",
+            "title": "Confidence",
+            "type": "number"
+          },
+          "inputs": {
+            "items": {
+              "$ref": "#/components/schemas/HumanFactorInput"
+            },
+            "title": "Inputs",
+            "type": "array"
+          },
+          "model_version": {
+            "default": "",
+            "title": "Model Version",
+            "type": "string"
+          },
+          "source": {
+            "default": "neutral_missing",
+            "description": "reported (every input measured) | partial_neutral_missing (some measured) | neutral_missing (none measured).",
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "default": 1.0,
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "title": "HumanFactorGain",
+        "type": "object"
+      },
+      "HumanFactorInput": {
+        "description": "One wellness input to the dose human-factor gain, with provenance (ADR-0049).\n\n``value`` is the athlete's report on the 1\u201310 scale, or ``None`` when no check-in\nexists for the session. Following the ADR-0039 ``neutral_missing`` precedent, an\nunknown input is **labelled**, not silently filled: it contributes the identity\npenalty ``1.0`` (no penalty at all) and carries ``confidence = 0.0``, so a consumer\ncan always tell \"unknown\" from \"the athlete reported an average day\".",
+        "properties": {
+          "confidence": {
+            "default": 0.0,
+            "description": "1.0 for a reported value, 0.0 for a labelled neutral_missing.",
+            "title": "Confidence",
+            "type": "number"
+          },
+          "name": {
+            "description": "sleep_quality | life_stress_inverse",
+            "title": "Name",
+            "type": "string"
+          },
+          "penalty": {
+            "default": 1.0,
+            "description": "Multiplier this input contributed to the gain; always >= 1.0.",
+            "title": "Penalty",
+            "type": "number"
+          },
+          "source": {
+            "description": "Rung taken: reported | neutral_missing",
+            "title": "Source",
+            "type": "string"
+          },
+          "value": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Athlete report on the 1\u201310 scale, or null when unknown.",
+            "title": "Value"
+          }
+        },
+        "required": [
+          "name",
+          "source"
+        ],
+        "title": "HumanFactorInput",
+        "type": "object"
+      },
       "IntensityContribution": {
         "description": "One exercise's contribution to the session external intensity (ADR-0039).\n\nCarries the intensity value **and its provenance** so the dose is auditable: the\ne1RM denominator that produced a ``relative_load`` reading (value + semantics +\nthe observation it came from), which ladder rung was taken, and the aggregation\nweight (``w = reps \u00b7 load``).",
         "properties": {
@@ -4749,6 +4830,16 @@
                 "type": "null"
               }
             ]
+          },
+          "human_factor_gain": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/HumanFactorGain"
+              },
+              {
+                "type": "null"
+              }
+            ]
           }
         },
         "title": "StressDose",
@@ -5781,12 +5872,18 @@
             "type": "boolean"
           },
           "life_stress_inverse": {
-            "default": 5.0,
-            "description": "1 = Very high life stress, 10 = No life stress",
-            "maximum": 10.0,
-            "minimum": 1.0,
-            "title": "Life Stress Inverse",
-            "type": "number"
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "1 = Very high life stress, 10 = No life stress. null = not reported: no dose penalty is applied and the dose is labelled neutral_missing with zero human-factor confidence (ADR-0049).",
+            "title": "Life Stress Inverse"
           },
           "modality": {
             "enum": [
@@ -5834,11 +5931,18 @@
             "type": "array"
           },
           "sleep_quality": {
-            "default": 5.0,
-            "maximum": 10.0,
-            "minimum": 1.0,
-            "title": "Sleep Quality",
-            "type": "number"
+            "anyOf": [
+              {
+                "maximum": 10.0,
+                "minimum": 1.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "1 = Worst sleep, 10 = Best sleep. null = not reported: no dose penalty is applied and the dose is labelled neutral_missing with zero human-factor confidence (ADR-0049). Never imputed to a midpoint.",
+            "title": "Sleep Quality"
           },
           "timestamp": {
             "format": "date-time",

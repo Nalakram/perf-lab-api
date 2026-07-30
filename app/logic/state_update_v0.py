@@ -294,6 +294,64 @@ def _exp_decay(value: float, hours: float, tau: float) -> float:
     return value * math.exp(-hours / max(1e-6, tau))
 
 
+# Population centre and spread of the 1-10 wellness self-report scale, used to z-score
+# a report before it enters the clearance exponent. A report equal to the centre is
+# neutral (z = 0), i.e. it neither speeds nor slows fatigue clearance.
+RECOVERY_WELLNESS_CENTRE = 7.0
+RECOVERY_WELLNESS_SD = 2.0
+
+
+def _wellness_z(value: float | None, clip: float) -> float:
+    """Clipped z-score of a 1-10 wellness self-report, or exactly 0.0 when unknown.
+
+    Variables and units
+    -------------------
+    ``value``  x   : self-report, dimensionless ordinal on [1, 10], higher = better, or
+                     ``None`` when no check-in exists for the session.
+    ``mu``         : ``RECOVERY_WELLNESS_CENTRE`` = 7.0, same units as x.
+    ``sigma``      : ``RECOVERY_WELLNESS_SD`` = 2.0 points, strictly positive.
+    ``clip``       : ``params.recovery_zscore_scale`` = 2.0, in standard deviations.
+    Output is a dimensionless z-score in [-clip, +clip].
+
+    Equation
+    --------
+    Reported::  z(x) = clip_[-c, c]( (x - mu) / sigma )
+    Unknown ::  z(None) = 0.0   by definition — the identity element of the exponent.
+
+    ADR-0049 reconciliation. Before this change the caller substituted a bare ``7.0``
+    for an unknown input, while ``WorkoutLog`` imputed ``5.0`` for the very same field —
+    two different silent fills for one concept, and the workout path never reached the
+    ``None`` branch at all because the schema had already fabricated 5.0. The single
+    convention now is **unknown contributes nothing to the exponent**: z = 0, so that
+    input's factor ``exp(beta * 0) = 1``, leaving any *other* measured input's effect
+    intact. This is the identical convention the sibling shadow implementation already
+    ships (``app/logic/recovery_telemetry.clearance_multiplier``, which ``continue``s
+    past a ``None`` signal), and it is the same "unknown means no adjustment" rule the
+    dose engine's human-factor gain uses.
+
+    Writing z = 0 explicitly, rather than substituting the value that happens to
+    z-score to zero, also decouples the missing-data rule from the calibration of
+    ``mu``: if the centre is ever retuned away from 7.0, unknown stays neutral instead
+    of silently becoming a penalty or a bonus.
+
+    Boundary behaviour, monotonicity, stability
+    -------------------------------------------
+    - Monotone non-decreasing in x; strictly increasing on the unclipped interior.
+    - x = mu = 7 gives z = 0, identical to the unknown branch's value but reached for a
+      different reason: "the athlete reported a neutral day" vs "nobody reported".
+      The two remain distinguishable upstream via the labelled dose provenance.
+    - Over the full scale, (x - mu)/sigma spans [-3.0, +1.5]; the clip at c = 2.0 binds
+      only the poor-report tail, at x <= 3.
+    - sigma is a non-zero literal, so no division-by-zero guard is needed; the result is
+      finite and bounded, which is what keeps the caller's ``math.exp`` far from
+      overflow.
+    """
+    if value is None:
+        return 0.0
+    z = (value - RECOVERY_WELLNESS_CENTRE) / RECOVERY_WELLNESS_SD
+    return max(-clip, min(clip, z))
+
+
 def recovery_clearance_multiplier(
     axis: str,
     sleep_quality: float | None,
@@ -304,15 +362,33 @@ def recovery_clearance_multiplier(
 
     >1.0 = faster clearance (good recovery).
     <1.0 = slower clearance (poor recovery).
-    Bounded to [recovery_clearance_min, recovery_clearance_max].
-    Neutral at sleep_quality=7, life_stress_inverse=7.
+
+    Equation::
+
+        m = clip_[m_min, m_max]( exp( beta_sleep * z_sleep + beta_stress * z_stress ) )
+
+    with each ``z`` from :func:`_wellness_z` (0.0 for an unknown input, ADR-0049).
+    Bounded to [recovery_clearance_min, recovery_clearance_max] = [0.60, 1.50] by
+    default, hence strictly positive — the caller multiplies elapsed hours by it, and a
+    zero or negative multiplier would freeze or reverse fatigue decay.
+
+    Neutral (m = 1.0) when every input is either reported at
+    ``RECOVERY_WELLNESS_CENTRE`` or unknown. Monotone non-decreasing in each reported
+    input for non-negative betas. The exponent is bounded by
+    ``clip * (|beta_sleep| + |beta_stress|)``; at default parameters the widest axis is
+    ``cns`` (0.10 + 0.08) giving |exponent| <= 2.0 * 0.18 = 0.36, so ``math.exp`` stays
+    in [0.698, 1.433] — numerically tame, and the outer clip is a guard on retuned
+    betas rather than the usual path.
+
+    Live effect of the ADR-0049 fix: a session logged with no check-in used to arrive
+    here as the fabricated 5.0, i.e. z = -1 on both inputs, clearing cns fatigue at
+    ``exp(-0.18) = 0.835`` — a silent ~16% under-clearance imposed on athletes purely
+    for not filling in a form. It is now exactly 1.0.
     """
     beta = params.recovery_clearance_beta.get(axis, {"sleep": 0.06, "stress": 0.04})
-    sq = sleep_quality if sleep_quality is not None else 7.0
-    lsi = life_stress_inverse if life_stress_inverse is not None else 7.0
     scale = params.recovery_zscore_scale
-    z_sleep = max(-scale, min(scale, (sq - 7.0) / 2.0))
-    z_stress = max(-scale, min(scale, (lsi - 7.0) / 2.0))
+    z_sleep = _wellness_z(sleep_quality, scale)
+    z_stress = _wellness_z(life_stress_inverse, scale)
     raw = math.exp(beta["sleep"] * z_sleep + beta["stress"] * z_stress)
     return max(params.recovery_clearance_min, min(params.recovery_clearance_max, raw))
 

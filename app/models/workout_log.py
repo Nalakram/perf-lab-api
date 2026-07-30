@@ -50,9 +50,18 @@ class WorkoutLog(Base):
     distance_meters: Mapped[float] = mapped_column(Float, default=0.0)
     total_volume_load: Mapped[float] = mapped_column(Float, default=0.0)
 
-    # Human factors
-    sleep_quality: Mapped[float] = mapped_column(Float, default=5.0)
-    life_stress_inverse: Mapped[float] = mapped_column(Float, default=5.0)
+    # Human factors (ADR-0049: missing wellness is a gap, not an imputation).
+    # SQL NULL means "no check-in exists for this session" and must stay distinguishable
+    # from a real mid-scale report; the previous python-side ``default=5.0`` made every
+    # un-checked-in session indistinguishable from an athlete who reported 5/10, and the
+    # non-Optional annotation contradicted the column, which a000 already declared
+    # nullable. Both columns are already ``nullable=True`` in
+    # ``alembic/versions/a000_init_foundational_tables.py`` (lines 184-185), so this is a
+    # model-side correction only — no migration is required.
+    sleep_quality: Mapped[float | None] = mapped_column(Float, nullable=True, default=None)
+    life_stress_inverse: Mapped[float | None] = mapped_column(
+        Float, nullable=True, default=None
+    )
 
     # Computed dose (stored for auditability / replay)
     dose_snapshot: Mapped[dict[str, Any] | None] = mapped_column(

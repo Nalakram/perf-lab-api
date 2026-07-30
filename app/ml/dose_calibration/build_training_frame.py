@@ -99,6 +99,24 @@ def _sets_effective(row: pd.Series) -> float:
     return max(3.0, float(row["duration_minutes"]) / 12.0)
 
 
+def _wellness(row: pd.Series, field: str) -> float | None:
+    """A 1-10 wellness self-report from the frame, preserving unknown as ``None``.
+
+    ADR-0049: an absent report is a gap, not a value. The previous ``float(row.get(f)
+    or 5.0)`` did two wrong things at once — it fabricated the scale midpoint for a
+    missing report, and, because ``0.0 or 5.0`` is ``5.0``, it silently mapped a
+    ``0`` reading onto that same midpoint. ``0`` is out of the schema's ``[1, 10]``
+    domain, so it now raises a validation error at :func:`build_log` (as ``0.5``
+    already did) instead of being laundered into a plausible-looking 5.0. Missing and
+    zero are therefore distinct outcomes: missing is carried through as ``None`` and
+    dosed with a labelled neutral; zero is rejected as corrupt.
+    """
+    val = row.get(field)
+    if val is None or (isinstance(val, float) and np.isnan(val)):
+        return None
+    return float(val)
+
+
 def build_log(row: pd.Series) -> WorkoutLog:
     """Rebuild a minimal ``WorkoutLog`` from a frame row for dose recomputation."""
     rir = row.get("avg_rir")
@@ -112,8 +130,8 @@ def build_log(row: pd.Series) -> WorkoutLog:
         estimated_sets=float(row["sets_eff"]),
         novelty=float(row.get("novelty") or 1.0),
         avg_rir=rir_val,
-        sleep_quality=float(row.get("sleep_quality") or 5.0),
-        life_stress_inverse=float(row.get("life_stress_inverse") or 5.0),
+        sleep_quality=_wellness(row, "sleep_quality"),
+        life_stress_inverse=_wellness(row, "life_stress_inverse"),
     )
 
 
