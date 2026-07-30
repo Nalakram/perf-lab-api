@@ -102,6 +102,14 @@ vi.mock("../sim", async (importOriginal) => {
 
 const { LogWorkoutModal } = await import("./LogWorkoutModal");
 
+// The REAL store's initial check-in — deliberately not the local `checkin()` helper.
+// The mock above replaces the store for the component, so without this the whole
+// integration test would be insulated from the actual seed and would stay green if
+// `store.initialState` reintroduced one. This is the link that makes the frontend
+// inversion (restore the seed) turn THIS file red.
+const realStore = await vi.importActual<typeof import("../store")>("../store");
+const REAL_INITIAL_CHECKIN = realStore.initialState().checkin;
+
 beforeEach(() => {
   logged.length = 0;
   simulated.length = 0;
@@ -120,7 +128,7 @@ async function submit(ci: CheckinState): Promise<Record<string, unknown>> {
 
 describe("the object handed to logWorkout (#199)", () => {
   it("NO CHECK-IN: omits sleep_quality AND life_stress_inverse entirely", async () => {
-    const b = await submit(checkin());
+    const b = await submit(REAL_INITIAL_CHECKIN);
     expect(hasKey(b, "sleep_quality"), "sleep_quality must be absent").toBe(false);
     expect(hasKey(b, "life_stress_inverse"), "life_stress_inverse must be absent").toBe(false);
     // And absent on the wire, not merely undefined in the object.
@@ -130,7 +138,7 @@ describe("the object handed to logWorkout (#199)", () => {
   });
 
   it("NO CHECK-IN: neither field is 5, 5.5, 7, or 0", async () => {
-    const b = await submit(checkin());
+    const b = await submit(REAL_INITIAL_CHECKIN);
     for (const forbidden of [0, 5, 5.5, 7, 7.5]) {
       expect(b.sleep_quality).not.toBe(forbidden);
       expect(b.life_stress_inverse).not.toBe(forbidden);
@@ -172,7 +180,7 @@ describe("the object handed to logWorkout (#199)", () => {
   it("the unauthenticated simulate-dose preview omits them too", async () => {
     // /v1/simulate-dose shares the WorkoutLog schema and must not be broken by the
     // change — nor may it be the surface that reintroduces a fabricated value.
-    storeCheckin = checkin();
+    storeCheckin = REAL_INITIAL_CHECKIN;
     render(<LogWorkoutModal />);
     await vi.waitFor(() => expect(simulated.length).toBeGreaterThan(0));
     const b = simulated[0] as unknown as Record<string, unknown>;

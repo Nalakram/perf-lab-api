@@ -151,13 +151,19 @@ describe("state-product sweep: every check-in state maps honestly", () => {
   });
 
   it("the other four check-in signals never reach the workout log at all", () => {
-    // Only sleep and mood map to WorkoutLog fields. If a future edit widens the
-    // mapping, this catches it before the value ships.
+    // Only sleep quality and motivation map to WorkoutLog fields. If a future edit
+    // widened the mapping, this catches it before the value ships.
+    //
+    // Asserted on PARSED values, not a substring of the serialized body: `:5` also
+    // occurs inside the ISO timestamp roughly a sixth of the time, which made an
+    // earlier substring version of this test fail on the clock rather than on a leak.
     const loud = checkin({ hrv: 200, sleepH: 12, rhr: 30, soreness: "high", stress: 5, done: true });
-    const b = body(checkinToWorkoutWellness(loud));
-    const serialized = JSON.stringify(b);
+    const b = JSON.parse(JSON.stringify(body(checkinToWorkoutWellness(loud))));
+    expect(hasKey(b, "sleep_quality"), "sleepQ unreported: must stay absent").toBe(false);
+    expect(hasKey(b, "life_stress_inverse"), "mood unreported: must stay absent").toBe(false);
+    const values = Object.values(b);
     for (const v of [200, 12, 30, 5]) {
-      expect(serialized, `unrelated check-in signal ${v} leaked`).not.toContain(`:${v}`);
+      expect(values, `unrelated check-in signal ${v} leaked into the body`).not.toContain(v);
     }
   });
 });
