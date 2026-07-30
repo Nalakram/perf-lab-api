@@ -9,7 +9,14 @@
 // (sidebar + main + overlays). State lives in <PerfLabProvider> (see main.tsx);
 // auth lives in <AuthProvider>. A 401 on any /v1 call clears the token and
 // bounces the user back to the gate.
+//
+// Only a 401 does that, though. A transient failure (5xx, offline, CORS,
+// garbled payload) now KEEPS the session — the athlete stays here with
+// `user === null` and every token-gated card in its own unavailable state, so
+// <SessionNotice> is mounted alongside the gate to explain that and offer a
+// retry. It renders nothing while the session is healthy.
 import { useEffect } from "react";
+import { SessionNotice } from "./auth/SessionNotice";
 import { useAuth } from "./auth/useAuth";
 import { usePerfLab } from "./perflab/store";
 import { AppShell } from "./perflab/AppShell";
@@ -29,5 +36,10 @@ export default function App() {
 
   if (!isAuthenticated && !isGuest) return <LoginScreen />;
 
-  return state.screen === "onboarding" ? <OnboardingScreen /> : <AppShell />;
+  return (
+    <>
+      {state.screen === "onboarding" ? <OnboardingScreen /> : <AppShell />}
+      <SessionNotice />
+    </>
+  );
 }
