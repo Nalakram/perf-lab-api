@@ -8,7 +8,18 @@ import {
 
 import * as api from "../api/perfLabClient";
 import type { OnboardRequest, ProfileRead, UserResponse } from "../types";
-import { AuthContext, type AuthContextValue } from "./perfLabAuthContext";
+import {
+  classifyAuthFailure,
+  describeSessionUnavailable,
+  isSessionUser,
+  MALFORMED_SESSION_RESPONSE,
+  type SessionPreserved,
+} from "./authFailure";
+import {
+  AuthContext,
+  type AuthContextValue,
+  type SessionUnavailable,
+} from "./perfLabAuthContext";
 import { setUnauthorizedHandler } from "./sessionBridge";
 import {
   clearStoredSession,
@@ -29,6 +40,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   // backend write stays a no-op and nothing is persisted. It only unlocks the
   // login gate so a curious user can onboard and play with the local twin.
   const [isGuest, setIsGuest] = useState(false);
+  // Set when GET /auth/me could not be confirmed for a reason that is NOT an
+  // expired login. The token stays put; see ./authFailure for the policy.
+  const [sessionUnavailable, setSessionUnavailable] =
+    useState<SessionUnavailable | null>(null);
 
   const logout = useCallback(() => {
     clearStoredSession();
@@ -36,6 +51,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
     setProfile(null);
     setIsGuest(false);
+    setSessionUnavailable(null);
   }, []);
 
   // Load the athlete profile for the current token. Exposed so consumers can
@@ -69,34 +85,77 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     return () => setUnauthorizedHandler(null);
   }, []);
 
-  useEffect(() => {
-    if (!token) {
-      setUser(null);
-      setProfile(null);
-      return;
-    }
-    let cancelled = false;
-    void (async () => {
+  const toUnavailable = useCallback(
+    (failure: SessionPreserved) => ({
+      reason: failure.reason,
+      status: failure.status,
+      message: describeSessionUnavailable(failure.reason),
+    }),
+    [],
+  );
+
+  /**
+   * Confirm the stored session against the backend.
+   *
+   * The ONLY outcome that clears the session is a positively-identified 401.
+   * Any other failure — 5xx, other 4xx, offline/CORS `TypeError`, unparseable
+   * payload, anything unrecognised — keeps the token and raises a retryable
+   * `sessionUnavailable`, because none of those prove the athlete is logged out.
+   */
+  const loadSession = useCallback(
+    async (activeToken: string, isCancelled: () => boolean) => {
       try {
-        const u = await api.fetchMe(token);
-        if (!cancelled) setUser(u);
-      } catch {
-        if (!cancelled) logout();
+        const u = await api.fetchMe(activeToken);
+        if (isCancelled()) return;
+        if (!isSessionUser(u)) {
+          // A 200 that is not a session (proxy interstitial, HTML error page).
+          setSessionUnavailable(toUnavailable(MALFORMED_SESSION_RESPONSE));
+          return;
+        }
+        setUser(u);
+        setSessionUnavailable(null);
+      } catch (err) {
+        if (isCancelled()) return;
+        const failure = classifyAuthFailure(err);
+        if (failure.action === "sign-out") {
+          logout();
+          return;
+        }
+        setSessionUnavailable(toUnavailable(failure));
         return;
       }
       // Profile is best-effort — a missing/failed load just leaves it null and
       // consumers fall back (e.g. sidebar → email local-part).
       try {
-        const p = await api.getProfile(token);
-        if (!cancelled) setProfile(p);
+        const p = await api.getProfile(activeToken);
+        if (!isCancelled()) setProfile(p);
       } catch {
-        if (!cancelled) setProfile(null);
+        if (!isCancelled()) setProfile(null);
       }
-    })();
+    },
+    [logout, toUnavailable],
+  );
+
+  /** Retry a session check that failed transiently, from a UI affordance. */
+  const retrySession = useCallback(async () => {
+    const t = getStoredToken();
+    if (!t) return;
+    await loadSession(t, () => false);
+  }, [loadSession]);
+
+  useEffect(() => {
+    if (!token) {
+      setUser(null);
+      setProfile(null);
+      setSessionUnavailable(null);
+      return;
+    }
+    let cancelled = false;
+    void loadSession(token, () => cancelled);
     return () => {
       cancelled = true;
     };
-  }, [token, logout]);
+  }, [token, loadSession]);
 
   const login = useCallback(async (emailIn: string, password: string) => {
     setIsLoading(true);
@@ -159,6 +218,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       isAuthenticated: Boolean(token),
       isGuest,
       isLoading,
+      sessionUnavailable,
+      retrySession,
       onboardingPending,
       login,
       register,
@@ -167,7 +228,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       enterGuest,
       logout,
     }),
-    [token, user, profile, email, isGuest, isLoading, onboardingPending, login, register, completeOnboarding, refreshProfile, enterGuest, logout],
+    [token, user, profile, email, isGuest, isLoading, sessionUnavailable, retrySession, onboardingPending, login, register, completeOnboarding, refreshProfile, enterGuest, logout],
   );
 
   return (
