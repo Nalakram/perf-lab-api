@@ -1,12 +1,11 @@
 // src/perflab/overlays/CheckinModal.tsx
 import { useState } from "react";
-import type { InputHTMLAttributes } from "react";
 import { cn } from "@/lib/utils";
 import { useAuth } from "@/auth/useAuth";
 import { getReadiness, ingestWellness, updateProfile } from "@/api/perfLabClient";
 import type { ApiError, ReadinessScore } from "@/types";
 import { usePerfLab } from "../store";
-import { buildCheckin } from "../sim";
+import { buildCheckin, NOT_REPORTED } from "../sim";
 import { readinessColor, readinessWord } from "../readinessPresentation";
 import {
   WELLNESS_SIGNALS,
@@ -26,14 +25,74 @@ const SORE: ["none" | "mild" | "moderate" | "high", string][] = [
 
 const CONF_WORD: Record<string, string> = { high: "High", medium: "Medium", low: "Low" };
 
-function Slider({ label, display, ...rest }: { label: string; display: string } & InputHTMLAttributes<HTMLInputElement>) {
+/**
+ * A self-report slider with a genuine NOT-REPORTED state (#199).
+ *
+ * `value === null` is the state every signal starts in. The readout then says
+ * "Not reported" — never a number — and the control is visibly muted. The thumb still
+ * needs somewhere to sit, so it rests at the scale midpoint, but that position is not
+ * presented as an answer anywhere: no number is shown, and nothing is submitted until
+ * the athlete moves it, which commits a real value. `Clear` returns to not-reported, so
+ * the state is reachable again after a mistake rather than being a one-way door.
+ */
+function Slider({
+  label,
+  value,
+  format,
+  min,
+  max,
+  step,
+  disabled,
+  onCommit,
+  onClear,
+}: {
+  label: string;
+  value: number | null;
+  format: (n: number) => string;
+  min: number;
+  max: number;
+  step: number;
+  disabled?: boolean;
+  onCommit: (n: number) => void;
+  onClear: () => void;
+}) {
+  const reported = value !== null;
+  const position = reported ? value : (min + max) / 2;
   return (
     <div>
       <div className="mb-[9px] flex items-center justify-between">
         <span className="font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.12em] text-mute">{label}</span>
-        <span className="font-mono text-[13px] font-semibold leading-none text-ac">{display}</span>
+        <div className="flex items-center gap-[9px]">
+          <span
+            className={cn(
+              "font-mono text-[13px] font-semibold leading-none",
+              reported ? "text-ac" : "italic text-faint",
+            )}
+          >
+            {reported ? format(value) : NOT_REPORTED}
+          </span>
+          {reported && !disabled && (
+            <button
+              onClick={onClear}
+              title="Mark as not reported"
+              className="text-[10px] font-semibold uppercase leading-none tracking-[0.1em] text-faint hover:text-ac hover:underline"
+            >
+              Clear
+            </button>
+          )}
+        </div>
       </div>
-      <input type="range" {...rest} className="w-full cursor-pointer" style={{ accentColor: "var(--ac)" }} />
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={position}
+        disabled={disabled}
+        onChange={(e) => onCommit(+e.target.value)}
+        className={cn("w-full cursor-pointer", !reported && "opacity-40")}
+        style={{ accentColor: reported ? "var(--ac)" : "#7c818c" }}
+      />
     </div>
   );
 }
@@ -162,18 +221,26 @@ export function CheckinModal() {
               <div key={s.key} className={dim(s.key)}>
                 {s.key === "sleep" && (
                   <>
-                    <Slider label="Sleep duration" display={`${ci.sleepH} h`} min={4} max={10} step={0.5} value={ci.sleepH} disabled={isUnknown("sleep")} onChange={(e) => actions.setCheckin({ sleepH: +e.target.value })} />
+                    <Slider label="Sleep duration" value={ci.sleepH} format={(n) => `${n} h`} min={4} max={10} step={0.5} disabled={isUnknown("sleep")} onCommit={(n) => actions.setCheckin({ sleepH: n })} onClear={() => actions.setCheckin({ sleepH: null })} />
                     <div className="mt-3">
-                      <Slider label="Sleep quality" display={`${ci.sleepQ}/5`} min={1} max={5} step={1} value={ci.sleepQ} disabled={isUnknown("sleep")} onChange={(e) => actions.setCheckin({ sleepQ: +e.target.value })} />
+                      <Slider label="Sleep quality" value={ci.sleepQ} format={(n) => `${n}/5`} min={1} max={5} step={1} disabled={isUnknown("sleep")} onCommit={(n) => actions.setCheckin({ sleepQ: n })} onClear={() => actions.setCheckin({ sleepQ: null })} />
                     </div>
                   </>
                 )}
                 {s.key === "soreness" && (
                   <>
-                    <div className="mb-[9px] font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.12em] text-mute">Soreness</div>
+                    <div className="mb-[9px] flex items-center justify-between">
+                      <span className="font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.12em] text-mute">Soreness</span>
+                      {/* No chip is selected until the athlete picks one; clicking the
+                          selected chip returns to not-reported (#199). */}
+                      <span className={cn("font-mono text-[13px] font-semibold leading-none", ci.soreness === null ? "italic text-faint" : "text-ac")}>
+                        {ci.soreness === null ? NOT_REPORTED : ""}
+                      </span>
+                    </div>
                     <div className="flex gap-2">
                       {SORE.map(([k, label]) => (
-                        <div key={k} onClick={() => !isUnknown("soreness") && actions.setCheckin({ soreness: k })}
+                        <div key={k} title={ci.soreness === k ? "Click again to mark as not reported" : undefined}
+                          onClick={() => !isUnknown("soreness") && actions.setCheckin({ soreness: ci.soreness === k ? null : k })}
                           className={cn("flex-1 cursor-pointer rounded-[9px] border px-[6px] py-[10px] text-center text-[12px] font-semibold leading-none", ci.soreness === k ? "border-ac/40 bg-ac/[0.12] text-ac" : "border-white/10 bg-panel text-mute")}>
                           {label}
                         </div>
@@ -182,16 +249,16 @@ export function CheckinModal() {
                   </>
                 )}
                 {s.key === "mood" && (
-                  <Slider label="Motivation" display={`${ci.mood} / 5`} min={1} max={5} step={1} value={ci.mood} disabled={isUnknown("mood")} onChange={(e) => actions.setCheckin({ mood: +e.target.value })} />
+                  <Slider label="Motivation" value={ci.mood} format={(n) => `${n} / 5`} min={1} max={5} step={1} disabled={isUnknown("mood")} onCommit={(n) => actions.setCheckin({ mood: n })} onClear={() => actions.setCheckin({ mood: null })} />
                 )}
                 {s.key === "stress" && (
-                  <Slider label="Stress" display={`${ci.stress} / 5`} min={1} max={5} step={1} value={ci.stress} disabled={isUnknown("stress")} onChange={(e) => actions.setCheckin({ stress: +e.target.value })} />
+                  <Slider label="Stress" value={ci.stress} format={(n) => `${n} / 5`} min={1} max={5} step={1} disabled={isUnknown("stress")} onCommit={(n) => actions.setCheckin({ stress: n })} onClear={() => actions.setCheckin({ stress: null })} />
                 )}
                 {s.key === "hrv" && (
-                  <Slider label="HRV (overnight)" display={`${ci.hrv} ms`} min={30} max={110} step={1} value={ci.hrv} disabled={isUnknown("hrv")} onChange={(e) => actions.setCheckin({ hrv: +e.target.value })} />
+                  <Slider label="HRV (overnight)" value={ci.hrv} format={(n) => `${n} ms`} min={30} max={110} step={1} disabled={isUnknown("hrv")} onCommit={(n) => actions.setCheckin({ hrv: n })} onClear={() => actions.setCheckin({ hrv: null })} />
                 )}
                 {s.key === "rhr" && (
-                  <Slider label="Resting HR" display={`${ci.rhr} bpm`} min={38} max={72} step={1} value={ci.rhr} disabled={isUnknown("rhr")} onChange={(e) => actions.setCheckin({ rhr: +e.target.value })} />
+                  <Slider label="Resting HR" value={ci.rhr} format={(n) => `${n} bpm`} min={38} max={72} step={1} disabled={isUnknown("rhr")} onCommit={(n) => actions.setCheckin({ rhr: n })} onClear={() => actions.setCheckin({ rhr: null })} />
                 )}
                 {signedIn && (
                   <SignalControls

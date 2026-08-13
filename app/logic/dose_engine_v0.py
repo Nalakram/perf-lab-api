@@ -25,6 +25,8 @@ from app.logic.strength_calibration import CalibrationResult
 from app.schemas.workouts import (
     ExerciseEntry,
     ExternalIntensity,
+    HumanFactorGain,
+    HumanFactorInput,
     IntensityContribution,
     StressDose,
     WorkoutLog,
@@ -308,6 +310,133 @@ def _compute_adaptation_contribution(
 
 
 # ---------------------------------------------------------------------------
+# Human-factor gain (ADR-0049: missing wellness is a gap, not an imputation)
+# ---------------------------------------------------------------------------
+
+# Versioned because the *meaning* of the gain changed: before, an absent wellness
+# report was silently replaced by the 5.0 scale midpoint and then scored against
+# ``dose_human_factor_reference``; now absence is carried as unknown and contributes
+# the identity penalty, labelled. The parameters themselves (``dose_human_factor_
+# reference``, ``dose_human_factor_slope``) keep their exact prior meaning and values
+# — only the handling of the *unknown* input changed, so the version lives here rather
+# than mutating a calibrated parameter in place.
+_HUMAN_FACTOR_MODEL_VERSION = "human_factor_gain@v1-gap-aware"
+
+
+def _human_factor_input(
+    name: str, value: float | None, p: EngineParameters
+) -> HumanFactorInput:
+    """One wellness input's contribution to the dose gain, with provenance.
+
+    Variables and units
+    -------------------
+    ``value``  x  : athlete self-report, dimensionless ordinal on [1, 10], higher =
+                    better (better sleep / *less* life stress — the field is already
+                    inverted), or ``None`` when no check-in exists. Bounds are enforced
+                    by the schema (``ge=1, le=10``), so a reported x is always in domain.
+    ``x_ref``     : ``p.dose_human_factor_reference`` — the report at or above which no
+                    penalty is due. Dimensionless, same scale as x. Default 5.0.
+    ``k``         : ``p.dose_human_factor_slope`` — penalty per point of shortfall below
+                    x_ref, units 1/point. Default 0.2, and ``k >= 0`` by construction of
+                    the parameter set.
+    ``penalty``   : dimensionless multiplier, output.
+
+    Equation
+    --------
+    Reported (unchanged from before this change)::
+
+        penalty(x) = 1 + max(0, (x_ref - x) * k)
+
+    Unknown (the change)::
+
+        penalty(None) = 1.0   exactly, by definition — not by evaluating the equation
+                              at any substituted x.
+
+    Previously ``None`` could not occur: the schema imputed x = 5.0 and the equation was
+    evaluated at the midpoint. With the default x_ref = 5.0 that happened to yield 1.0,
+    so the old imputation was *numerically* neutral only by coincidence —
+    ``dose_human_factor_reference`` is a calibratable field (see
+    ``app/engine/parameter_overrides.py`` ``_DOSE_SCALAR_FIELDS``), so any calibration
+    moving x_ref above 5.0 would have turned the fabricated midpoint into a real,
+    invisible penalty on every athlete who simply did not check in. Returning exactly
+    1.0 for unknown removes that coupling permanently.
+
+    Domain, monotonicity, boundedness
+    ---------------------------------
+    - Domain of the reported branch: x in [1, 10]; x_ref = 5.0, k = 0.2 by default.
+    - Monotone non-increasing in x: dpenalty/dx = -k for x < x_ref, 0 for x > x_ref.
+      A worse report never lowers the penalty.
+    - Boundary behaviour: x = x_ref gives the kink, penalty = 1.0 exactly and the
+      one-sided derivatives are -k and 0 (continuous, not differentiable at the kink).
+      x >= x_ref gives 1.0 (a great night's sleep earns no *discount*, matching the
+      pre-change law). x = 1 (worst case) gives the maximum
+      1 + (x_ref - 1) * k = 1.8 at defaults.
+    - Bounded below by 1.0 (the ``max(0, .)`` floor) and above by
+      1 + (x_ref - 1) * k, finite for finite parameters. Never negative, never zero, so
+      it is always safe as a divisor.
+
+    Uncertainty
+    -----------
+    ``confidence`` is 1.0 for a reported value and 0.0 for a labelled neutral, mirroring
+    the ADR-0039 ``neutral_missing`` rung. The dose *value* is unchanged by an unknown
+    input; what changes is that the consumer can see the input was never measured.
+    """
+    if value is None:
+        return HumanFactorInput(
+            name=name, value=None, source="neutral_missing", confidence=0.0, penalty=1.0
+        )
+    penalty = 1.0 + max(0.0, (p.dose_human_factor_reference - value) * p.dose_human_factor_slope)
+    return HumanFactorInput(
+        name=name, value=value, source="reported", confidence=1.0, penalty=penalty
+    )
+
+
+def _human_factor_gain(
+    sleep_quality: float | None,
+    life_stress_inverse: float | None,
+    p: EngineParameters,
+) -> HumanFactorGain:
+    """Combine the wellness inputs into the labelled global dose gain.
+
+    Equation::
+
+        G = Π_i penalty_i   over i in {sleep_quality, life_stress_inverse}
+
+    Each factor is in [1, 1 + (x_ref - 1)·k], so ``G`` is in
+    [1, (1 + (x_ref - 1)·k)^2] = [1, 3.24] at default parameters: strictly positive,
+    bounded, and monotone non-increasing in each input. ``G >= 1`` is what makes the
+    reciprocal use at the adaptation step (``adapt / G``) numerically safe — there is no
+    input, present or absent, for which ``G`` can reach 0.
+
+    With **both** inputs unknown ``G = 1.0`` exactly: a session logged without a check-in
+    is dosed as if human factors were neutral, and is labelled ``neutral_missing`` with
+    zero confidence rather than being scored as an average athlete (ADR-0049). No prior
+    session's wellness is carried forward.
+    """
+    inputs = [
+        _human_factor_input("sleep_quality", sleep_quality, p),
+        _human_factor_input("life_stress_inverse", life_stress_inverse, p),
+    ]
+    value = 1.0
+    for item in inputs:
+        value *= item.penalty
+    reported = sum(1 for item in inputs if item.source == "reported")
+    if reported == len(inputs):
+        source = "reported"
+    elif reported == 0:
+        source = "neutral_missing"
+    else:
+        source = "partial_neutral_missing"
+    return HumanFactorGain(
+        value=value,
+        source=source,
+        confidence=sum(item.confidence for item in inputs) / len(inputs),
+        model_version=_HUMAN_FACTOR_MODEL_VERSION,
+        inputs=inputs,
+    )
+
+
+# ---------------------------------------------------------------------------
 # Primary entry point
 # ---------------------------------------------------------------------------
 
@@ -398,12 +527,13 @@ def calculate_stress_dose(
     # ------------------------------------------------------------------
     six = _shape_six(base, log.modality, intensity_u, Delta, F, phi_adapt, energy_mix, p)
 
-    # Human-factor gain
-    hf_ref = p.dose_human_factor_reference
-    hf_slope = p.dose_human_factor_slope
-    sleep_penalty = 1.0 + max(0.0, (hf_ref - log.sleep_quality) * hf_slope)
-    life_penalty = 1.0 + max(0.0, (hf_ref - log.life_stress_inverse) * hf_slope)
-    global_gain = sleep_penalty * life_penalty
+    # Human-factor gain (ADR-0049). An unknown wellness input contributes the identity
+    # penalty 1.0 and is labelled ``neutral_missing`` with zero confidence — never the
+    # scale midpoint, and never carried forward from a prior session. See
+    # ``_human_factor_input`` for the full equation, domains and boundary behaviour.
+    # ``hf.value >= 1.0`` always, which keeps the reciprocal below well-defined.
+    hf = _human_factor_gain(log.sleep_quality, log.life_stress_inverse, p)
+    global_gain = hf.value
     six = six.scaled(global_gain)
 
     # ------------------------------------------------------------------
@@ -438,6 +568,7 @@ def calculate_stress_dose(
         d_struct_damage=max(0.0, d_struct_damage),
         d_struct_signal=max(0.0, d_struct_signal),
         external_intensity=ext,
+        human_factor_gain=hf,
     )
 
 

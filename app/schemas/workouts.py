@@ -126,12 +126,28 @@ class WorkoutLog(BaseModel):
         description="If set, refines volume term in dose law",
     )
 
-    sleep_quality: float = Field(5.0, ge=1, le=10)
-    life_stress_inverse: float = Field(
-        5.0,
+    # Human factors (ADR-0049: "missing wellness signals are gaps, not imputed").
+    # ``None`` means *no check-in exists for this session* and is carried as unknown all
+    # the way to the engine, the ORM row (SQL NULL) and the calibration frame. It is
+    # NEVER filled with the scale midpoint and NEVER carried forward from a prior
+    # session — a silent 5.0 is indistinguishable from a real "5/10" report and would
+    # manufacture false normality on exactly the days missingness is most informative.
+    # When a value IS supplied it is a genuine athlete report bounded to [1, 10].
+    sleep_quality: float | None = Field(
+        default=None,
         ge=1,
         le=10,
-        description="1 = Very high life stress, 10 = No life stress",
+        description="1 = Worst sleep, 10 = Best sleep. null = not reported: no dose "
+        "penalty is applied and the dose is labelled neutral_missing with zero "
+        "human-factor confidence (ADR-0049). Never imputed to a midpoint.",
+    )
+    life_stress_inverse: float | None = Field(
+        default=None,
+        ge=1,
+        le=10,
+        description="1 = Very high life stress, 10 = No life stress. null = not "
+        "reported: no dose penalty is applied and the dose is labelled "
+        "neutral_missing with zero human-factor confidence (ADR-0049).",
     )
 
     # Per-set breakdown (ADR-0045). The atomic logged unit; when present the sets
@@ -207,6 +223,55 @@ class ExternalIntensity(BaseModel):
     contributions: list[IntensityContribution] = Field(default_factory=lambda: [])
 
 
+class HumanFactorInput(BaseModel):
+    """One wellness input to the dose human-factor gain, with provenance (ADR-0049).
+
+    ``value`` is the athlete's report on the 1–10 scale, or ``None`` when no check-in
+    exists for the session. Following the ADR-0039 ``neutral_missing`` precedent, an
+    unknown input is **labelled**, not silently filled: it contributes the identity
+    penalty ``1.0`` (no penalty at all) and carries ``confidence = 0.0``, so a consumer
+    can always tell "unknown" from "the athlete reported an average day".
+    """
+
+    name: str = Field(description="sleep_quality | life_stress_inverse")
+    value: float | None = Field(
+        default=None,
+        description="Athlete report on the 1–10 scale, or null when unknown.",
+    )
+    source: str = Field(description="Rung taken: reported | neutral_missing")
+    confidence: float = Field(
+        default=0.0,
+        description="1.0 for a reported value, 0.0 for a labelled neutral_missing.",
+    )
+    penalty: float = Field(
+        default=1.0,
+        description="Multiplier this input contributed to the gain; always >= 1.0.",
+    )
+
+
+class HumanFactorGain(BaseModel):
+    """The human-factor (wellness) gain applied to the six-axis dose (ADR-0049).
+
+    ``value`` is the product of the per-input penalties, so it lies in ``[1, inf)``: it
+    scales the dose **up** and the adaptation contribution **down**. ``source`` names the
+    weakest rung any input took, so a dose computed from a real check-in is
+    distinguishable from one computed with a labelled neutral for missing wellness.
+    """
+
+    value: float = 1.0
+    source: str = Field(
+        default="neutral_missing",
+        description="reported (every input measured) | partial_neutral_missing (some "
+        "measured) | neutral_missing (none measured).",
+    )
+    confidence: float = Field(
+        default=0.0,
+        description="Mean of the per-input confidences: 1.0 all reported, 0.0 none.",
+    )
+    model_version: str = ""
+    inputs: list[HumanFactorInput] = Field(default_factory=lambda: [])
+
+
 class StressDose(BaseModel):
     """
     Stress dose: six-dimensional engine vector plus legacy scalars for clients.
@@ -229,3 +294,8 @@ class StressDose(BaseModel):
     # ADR-0039: the external intensity that shaped this dose, with full provenance.
     # None on paths that never computed one (kept optional for backward-compat dumps).
     external_intensity: ExternalIntensity | None = None
+
+    # ADR-0049: the wellness gain that scaled this dose, with per-input provenance, so
+    # "no check-in" is auditable rather than laundered into a midpoint. None only on
+    # legacy dose_snapshot dumps written before this field existed.
+    human_factor_gain: HumanFactorGain | None = None

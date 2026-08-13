@@ -30,21 +30,35 @@ export const WELLNESS_SIGNALS: WellnessSignalDef[] = [
 
 const SORE_TO_0_10: Record<string, number> = { none: 0, mild: 3, moderate: 6, high: 9 };
 
-/** The WellnessSample metric value for a provided signal, from the check-in form. */
+/** Drop every key whose value is null, so an un-entered signal is OMITTED, not sent as
+ *  a fabricated number. `0` survives — it is a real reading (ADR-0046). */
+function present(fields: Record<string, number | null>): Partial<WellnessSampleIn> {
+  const out: Record<string, number> = {};
+  for (const [k, v] of Object.entries(fields)) if (v !== null) out[k] = v;
+  return out as Partial<WellnessSampleIn>;
+}
+
+/** Scale a nullable 1–5 self-report by `factor`, preserving "not reported" as null. */
+const scaled = (v: number | null, factor: number): number | null => (v === null ? null : v * factor);
+
+/** The WellnessSample metric value for a provided signal, from the check-in form.
+ *
+ *  A field the athlete never entered is `null` in `CheckinState` and is dropped here,
+ *  so "provided" mode never manufactures a value for an untouched slider (#199). */
 function metricValue(sig: WellnessSignalKey, c: CheckinState): Partial<WellnessSampleIn> {
   switch (sig) {
     case "sleep":
-      return { sleep_hours: c.sleepH, sleep_quality: c.sleepQ * 20 }; // 1–5 → 0–100
+      return present({ sleep_hours: c.sleepH, sleep_quality: scaled(c.sleepQ, 20) }); // 1–5 → 0–100
     case "hrv":
-      return { hrv_ms: c.hrv };
+      return present({ hrv_ms: c.hrv });
     case "rhr":
-      return { resting_hr: c.rhr };
+      return present({ resting_hr: c.rhr });
     case "soreness":
-      return { soreness: SORE_TO_0_10[c.soreness] ?? 0 };
+      return present({ soreness: c.soreness === null ? null : SORE_TO_0_10[c.soreness] ?? 0 });
     case "mood":
-      return { mood: c.mood * 2 }; // 1–5 → 0–10
+      return present({ mood: scaled(c.mood, 2) }); // 1–5 → 0–10
     case "stress":
-      return { stress: c.stress * 2 }; // 1–5 → 0–10, higher = worse
+      return present({ stress: scaled(c.stress, 2) }); // 1–5 → 0–10, higher = worse
   }
 }
 

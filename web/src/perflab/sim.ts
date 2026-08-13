@@ -124,14 +124,30 @@ export function buildProjection(p: SimParams): Projection {
 }
 
 // ---- Morning check-in → readiness ----
+
+export type Soreness = "none" | "mild" | "moderate" | "high";
+
+/**
+ * The morning check-in draft.
+ *
+ * EVERY self-reported field is `| null`, and `null` is the INITIAL state (see
+ * `store.initialState`). This is the #199 shape: "not reported" must be the state the
+ * app starts in, so there is no value to leak until the athlete actually enters one.
+ * A seeded constant here is indistinguishable, downstream, from a measurement — that is
+ * exactly how `sleepQ: 4` / `mood: 4` reached authenticated `POST /v1/log-workout` as if
+ * the athlete had reported them.
+ *
+ * `null` means unknown. `0` never does (ADR-0046: "value = null means unknown; 0 never
+ * does"), and neither does any midpoint — see ADR-0049 for the backend half.
+ */
 export interface CheckinState {
-  hrv: number;
-  sleepH: number;
-  sleepQ: number;
-  rhr: number;
-  soreness: "none" | "mild" | "moderate" | "high";
-  mood: number;
-  stress: number; // 1–5 self-report, higher = more stressed
+  hrv: number | null;
+  sleepH: number | null;
+  sleepQ: number | null;
+  rhr: number | null;
+  soreness: Soreness | null;
+  mood: number | null;
+  stress: number | null; // 1–5 self-report, higher = more stressed
   done: boolean;
 }
 
@@ -142,15 +158,34 @@ export interface CheckinDriver {
   color: string;
 }
 
+/** Display text for a signal the athlete has not entered. Never a number. */
+export const NOT_REPORTED = "Not reported";
+
+/**
+ * The readiness contribution of one self-report, or exactly 0 when it was never
+ * entered. Unknown contributes nothing — it is not scored as an average day. This is
+ * the same "unknown is the identity element" convention the backend uses for the dose
+ * human-factor gain and the fatigue-clearance exponent (ADR-0049).
+ */
+const term = (v: number | null, f: (n: number) => number): number => (v === null ? 0 : f(v));
+
 export function buildCheckin(c: CheckinState): { readiness: number; drivers: CheckinDriver[] } {
   const soreMap: Record<string, number> = { none: 8, mild: 0, moderate: -10, high: -22 };
+  const sleepText =
+    c.sleepH === null && c.sleepQ === null
+      ? NOT_REPORTED
+      : `${c.sleepH === null ? "—" : c.sleepH} h · quality ${c.sleepQ === null ? "—" : c.sleepQ}/5`;
   const parts = [
-    { n: "HRV", v: c.hrv + " ms", x: (c.hrv - 62) * 0.6 },
-    { n: "Sleep", v: c.sleepH + " h · quality " + c.sleepQ + "/5", x: (c.sleepH - 7) * 4 + (c.sleepQ - 3) * 3 },
-    { n: "Resting HR", v: c.rhr + " bpm", x: (58 - c.rhr) * 0.9 },
-    { n: "Soreness", v: c.soreness.charAt(0).toUpperCase() + c.soreness.slice(1), x: soreMap[c.soreness] || 0 },
-    { n: "Motivation", v: c.mood + " / 5", x: (c.mood - 3) * 2 },
-    { n: "Stress", v: c.stress + " / 5", x: (3 - c.stress) * 3 },
+    { n: "HRV", v: c.hrv === null ? NOT_REPORTED : `${c.hrv} ms`, x: term(c.hrv, (h) => (h - 62) * 0.6) },
+    { n: "Sleep", v: sleepText, x: term(c.sleepH, (h) => (h - 7) * 4) + term(c.sleepQ, (q) => (q - 3) * 3) },
+    { n: "Resting HR", v: c.rhr === null ? NOT_REPORTED : `${c.rhr} bpm`, x: term(c.rhr, (r) => (58 - r) * 0.9) },
+    {
+      n: "Soreness",
+      v: c.soreness === null ? NOT_REPORTED : c.soreness.charAt(0).toUpperCase() + c.soreness.slice(1),
+      x: c.soreness === null ? 0 : soreMap[c.soreness] || 0,
+    },
+    { n: "Motivation", v: c.mood === null ? NOT_REPORTED : `${c.mood} / 5`, x: term(c.mood, (m) => (m - 3) * 2) },
+    { n: "Stress", v: c.stress === null ? NOT_REPORTED : `${c.stress} / 5`, x: term(c.stress, (s) => (3 - s) * 3) },
   ];
   let r = 50;
   parts.forEach((p) => (r += p.x));

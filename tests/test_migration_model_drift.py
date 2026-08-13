@@ -76,7 +76,11 @@ def _diffs(sync_conn: Connection) -> list:
 # declared correct.
 COSMETIC_DRIFT_BASELINE = {
     "modify_comment": 43,
-    "modify_nullable": 29,
+    # 29 -> 27: ADR-0049 made workout_logs.sleep_quality / .life_stress_inverse
+    # `Mapped[float | None]`, which is what a000 already declared them (nullable=True,
+    # lines 184-185). The ORM's non-Optional annotation was the drift; the DB needed no
+    # migration. Locking the reduction in so the slack cannot silently return.
+    "modify_nullable": 27,
     "add_index": 13,
     "remove_index": 7,
     "remove_constraint": 2,
