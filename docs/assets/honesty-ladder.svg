@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1280 160" role="img" aria-labelledby="htitle hdesc">
+  <title id="htitle">Honesty ladder</title>
+  <desc id="hdesc">Evidence is measured, estimated, or unknown. Missing is a gap, never a fabricated midpoint.</desc>
+  <rect width="1280" height="160" rx="20" fill="#f8fafc" stroke="#e2e8f0"/>
+  <text x="36" y="36" fill="#64748b" font-family="ui-sans-serif, system-ui, sans-serif" font-size="12" letter-spacing="2">HONESTY LADDER · ADR-0049 / ADR-0059</text>
+  <g font-family="ui-sans-serif, system-ui, sans-serif" text-anchor="middle">
+    <g transform="translate(180,98)">
+      <rect x="-110" y="-32" width="220" height="64" rx="12" fill="#ecfdf5" stroke="#10b981"/>
+      <text y="-4" fill="#047857" font-size="11" letter-spacing="1">PROVENANCE</text>
+      <text y="18" fill="#064e3b" font-size="18" font-weight="700">measured</text>
+    </g>
+    <g transform="translate(480,98)">
+      <rect x="-110" y="-32" width="220" height="64" rx="12" fill="#eff6ff" stroke="#3b82f6"/>
+      <text y="-4" fill="#1d4ed8" font-size="11" letter-spacing="1">PROVENANCE</text>
+      <text y="18" fill="#1e3a8a" font-size="18" font-weight="700">estimated</text>
+    </g>
+    <g transform="translate(780,98)">
+      <rect x="-110" y="-32" width="220" height="64" rx="12" fill="#fff7ed" stroke="#f59e0b"/>
+      <text y="-4" fill="#b45309" font-size="11" letter-spacing="1">PROVENANCE</text>
+      <text y="18" fill="#7c2d12" font-size="18" font-weight="700">unknown</text>
+    </g>
+    <g transform="translate(1080,98)">
+      <rect x="-110" y="-32" width="220" height="64" rx="12" fill="#fef2f2" stroke="#ef4444"/>
+      <text y="-4" fill="#b91c1c" font-size="11" letter-spacing="1">FORBIDDEN</text>
+      <text y="18" fill="#7f1d1d" font-size="18" font-weight="700">never fake</text>
+    </g>
+    <polygon points="294,92 306,98 294,104" fill="#94a3b8"/>
+    <polygon points="594,92 606,98 594,104" fill="#94a3b8"/>
+    <polygon points="894,92 906,98 894,104" fill="#94a3b8"/>
+  </g>
+</svg>

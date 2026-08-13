@@ -1,322 +1,208 @@
-# Performance Lab API
+# Performance Lab
 
-A unified, modality-agnostic engine for estimating an athlete’s internal state and generating algorithmic training prescriptions.
+<p align="center">
+  <a href="https://github.com/markwuenschel-dev/perf-lab-api/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/markwuenschel-dev/perf-lab-api/actions/workflows/ci.yml/badge.svg"></a>
+  <img alt="version" src="https://img.shields.io/badge/version-0.3.0-0ea5e9">
+  <img alt="python" src="https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white">
+  <img alt="FastAPI" src="https://img.shields.io/badge/FastAPI-0.115%2B-009688?logo=fastapi&logoColor=white">
+  <img alt="React" src="https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black">
+  <img alt="Postgres" src="https://img.shields.io/badge/Postgres-16-4169E1?logo=postgresql&logoColor=white">
+  <img alt="coverage gate" src="https://img.shields.io/badge/coverage%20gate-%E2%89%A583%25-22c55e">
+  <img alt="ruff" src="https://img.shields.io/badge/lint-ruff-d7ff64">
+  <img alt="pyright" src="https://img.shields.io/badge/types-pyright-3178C6">
+  <img alt="vitest" src="https://img.shields.io/badge/web-vitest-6E9F18?logo=vitest&logoColor=white">
+  <img alt="license" src="https://img.shields.io/badge/license-MIT-informational">
+</p>
 
-This service powers a tactical running “Performance Lab” (300m + 1.5-mile inputs → VO₂, categories, pace zones, and programs via a legacy app entrypoint) and a versioned v1 API with per-user JWT auth, persisted state, and digital-twin ingest/prescription flows. It is being extended into a general framework for endurance, strength, Olympic lifting, and hypertrophy.
+<p align="center"><strong>A multi-domain training engine that models the athlete, not the workout.</strong></p>
 
-The companion frontend lives in the separate **`perf-lab-web`** repository (React + Vite + TypeScript + Tailwind).
+<p align="center">
+  FastAPI digital twin · React control console · Alembic/Postgres · JWT · Oura
+</p>
+
+![Digital twin loop](docs/assets/twin-loop.svg)
+
+Most training apps store sports: a 10K time, a squat 1RM, a race calendar. This repo stores **one body**. A latent state `S(t)` — capacity, fatigue, tissue, skill, habit — is updated by a stress dose `D(t)` and emits the next useful session `u(t)`.
+
+The backend is `app.main:app`. The control console lives in `web/` in this same repository. Live: [perflab.44-198-76-44.nip.io](https://perflab.44-198-76-44.nip.io).
 
 ---
 
-## Overview
+## How the twin thinks
 
-Most apps model sports (10K time, 1RM squat). This project models the athlete.
+```mermaid
+flowchart LR
+  subgraph Inputs
+    W[Workout log / sets]
+    B[Benchmark observation]
+    C[Wellness check-in]
+    O[Oura sync]
+  end
 
-Under the hood, the API maintains a latent Unified Athlete State Vector `S(t)` that captures capacities, batteries, fatigues, and short-lived adaptation signals across interacting systems (metabolic–cardiovascular, neuromuscular, CNS, structural–skeletal). Training sessions and field tests are converted into a stress dose vector `D(t)` that updates `S(t)` over multiple time scales. A prescriptive engine then uses the current state and a goal to choose the next workout.
+  W --> D["Dose engine  D(t)"]
+  B --> M[Measurement layer]
+  C --> R[Readiness]
+  O --> C
 
-The API exposes JSON endpoints; the complexity is internal.
+  D --> S["State update  S(t+1)"]
+  M --> S
+  R --> P
+
+  S --> P["Prescriber  u(t)"]
+  P --> Plan[Planned session]
+  Plan --> W
+
+  S -.->|shadow only| EKF[EKF / MPC / personalization]
+```
+
+| Symbol | Meaning | Owner |
+|---|---|---|
+| `D(t)` | Stress dose of one session | `app/logic/dose_engine_v0.py` |
+| `S(t)` | Unified athlete state (append-only history) | `app/services/state_service.py` |
+| `u(t)` | Next prescribed session | `app/services/prescription_service.py` |
+| Readiness | One backend-owned number, never recomputed in the client | `GET /v1/readiness` · [PDR-0005](docs/pdr/0005-one-backend-owned-readiness-number.md) |
+
+Missing wellness is a **gap**, not a midpoint. A fixture value must never look measured.
+
+![Honesty ladder](docs/assets/honesty-ladder.svg)
+
+```mermaid
+flowchart TB
+  subgraph Authority["Authority stack · ADR-0051"]
+    direction TB
+    S[Safety — absolute]
+    H[User hard override]
+    F[Objectives / floors]
+    X[Optimizer]
+    E[Tradeoff explanation]
+    S --> H --> F --> X --> E
+  end
+```
+
+The model **informs and self-limits**. It does not block or silently overwrite the athlete ([PDR-0010](docs/pdr/0010-model-self-limits-never-blocks-user.md)).
 
 ---
 
-## Stack
+## Repo map
 
-- **Language:** Python 3.12+
-- **Framework:** FastAPI (primary app version **0.2.0** in `app.main:app`)
-- **Server:** Uvicorn
-- **Config:** pydantic-settings (dotenv `.env` supported)
-- **Database:** SQLAlchemy 2.x (async) with `asyncpg` for the running API
-- **Migrations:** Alembic — three migrations ship with the repo (`a000` foundational tables, `a001` benchmark/KPI tables, `a002` planned-session benchmark columns). Run `alembic upgrade head` on a fresh database to create all tables.
-- **Auth:** JWT (`python-jose`), bcrypt hashing via passlib, OAuth2 password flow for `/auth/token`
-- **Testing (tooling):** pytest, pytest-asyncio, pytest-cov
-- **Lint / format / types:** ruff, black, isort, pyright
+```mermaid
+flowchart TB
+  subgraph mono["perf-lab-api"]
+    direction LR
+    API["app/<br/>FastAPI 0.3.0"]
+    WEB["web/<br/>React 19 + Vite"]
+    DB[(Postgres 16<br/>Alembic a000–a038)]
+    T["tests/ · 196 modules<br/>web vitest · 22 files"]
+  end
+  WEB -->|OpenAPI → types.gen.ts| API
+  API --> DB
+  API -.->|JWT + CORS| WEB
+```
 
-**Package manager:** [uv](https://docs.astral.sh/uv/) via [`pyproject.toml`](pyproject.toml) and [`uv.lock`](uv.lock).
+```text
+app/            FastAPI, services, engine, shadow EKF/MPC
+web/            React control console (pnpm, Vite, Tailwind 4)
+alembic/        Schema — Alembic only, never create_all
+tests/          pytest + Postgres integration (REQUIRE_DB in CI)
+docs/adr        Architecture decision records
+docs/pdr        Product decision records
+.github/        CI: import + OpenAPI + pytest/ruff/pyright + web build/vitest
+```
+
+---
+
+## Athlete loop
+
+```mermaid
+sequenceDiagram
+  actor Athlete
+  participant Auth as /auth
+  participant Twin as /v1
+  participant Engine as Dose + State
+  Athlete->>Auth: register + token
+  Athlete->>Twin: POST /v1/onboard
+  Twin-->>Athlete: baseline S0
+  Athlete->>Twin: GET /v1/next-session
+  Twin-->>Athlete: prescription u(t)
+  Athlete->>Twin: POST /v1/log-workout
+  Twin->>Engine: D(t) → S(t+1)
+  Engine-->>Twin: new snapshot
+  Twin-->>Athlete: updated twin
+  Athlete->>Twin: GET /v1/readiness
+```
+
+**Public:** `GET /ping` · `POST /v1/simulate-dose`
+
+**Auth (no `/v1` prefix):** `POST /auth/register` · `POST /auth/token` · `GET /auth/me`
+
+**Twin (JWT):** onboard, profile, history, log-workout, next-session, planning, wellness, readiness, objectives, macrocycles, benchmarks, dashboard, exercises, weak-points, Oura, shadow telemetry.
+
+Full contract: [`/docs`](http://127.0.0.1:8000/docs) locally, or [`docs/API_GUIDE.md`](docs/API_GUIDE.md).
+
+---
+
+## Quickstart
+
+Requires **Python 3.11+**, **uv**, **Node 22**, **pnpm 10**, and **Postgres 16**.
 
 ```bash
-uv sync --extra dev          # install runtime + dev deps
-uv run pytest -q             # run tests
-uv run ruff check .          # lint
-uv run pyright                 # type-check
-```
-
-Legacy [`requirements.txt`](requirements.txt) is kept for reference during transition.
-
----
-
-## Current status
-
-**Implemented (v0.2-style `app.main:app`):**
-
-- FastAPI with `/ping`, versioned ingest/prescription under `/v1`, and auth under `/auth`
-- JWT-protected workout logging and next-session prescription tied to the authenticated user
-- Public stress-dose simulation (`POST /v1/simulate-dose`)
-- Async Postgres persistence; ORM models for users, profiles, athlete state, exercises, mesocycles, weak points, workout logs (see **Project structure**)
-- [`app/services/state_service.py`](app/services/state_service.py) for state initialization and workout processing
-
-**Legacy entrypoint (`main:app`, version 0.1.0 in repo root [`main.py`](main.py)):**
-
-- Still exposes running calculators and programs (`/compute-metrics`, `/program/run`, `/program/strength`) and may run `Base.metadata.create_all` on startup — useful for VO₂ demo flows and bootstrapping tables when no Alembic revisions exist yet
-
-**Also implemented (v0.3):**
-
-- `POST /v1/onboard` — one-call athlete setup: profile + optional weak points + baseline state `S0`
-- `POST /v1/planning/blocks` / `GET /v1/planning/sessions` / `GET /v1/planning/today` — mesocycle block and session calendar
-- `POST /v1/benchmarks/observations` / `GET /v1/benchmarks/definitions` — benchmark recording and KPI recompute
-- `GET /v1/dashboard/bundle` — KPI summary and domain readiness surface
-- Equipment-aware prescription constraints; weak-point injection; block-context bias in prescriber
-
----
-
-## FastAPI Entrypoint (Single Source of Truth)
-
-**Use only this command:**
-
-```bash
-uvicorn app.main:app --reload
-```
-
-The root `main.py` (`uvicorn main:app`) is **deprecated**. It still works for the old VO₂ calculators and program generators (now served via the included legacy router), but it is no longer maintained and will be removed in a future release.
-
-All new development and deployment should use `app.main:app`. The legacy running calculators remain available under the modern app for backward compatibility.
-
----
-
-## Project structure
-
-```
-app/
-  api/
-    v1/
-      auth.py           # /auth/register, /auth/token, /auth/me (router prefix /auth)
-      ingest.py         # /v1/simulate-dose (public), /v1/log-workout (JWT)
-      prescribe.py      # /v1/next-session (JWT)
-  core/
-    config.py           # Settings + .env
-    db.py               # async engine, session, get_db
-    auth.py             # JWT, password hash, get_current_user
-  logic/
-    cross_talk.py
-    dose_engine.py
-    prescriber.py
-    state_update.py
-  models/
-    __init__.py         # exports all ORM models for Alembic
-    user.py             # User, AthleteProfile
-    athlete_state.py
-    exercise.py
-    mesocycle.py
-    weak_point.py
-    workout_log.py
-  schemas/
-    state.py
-    workouts.py
-  services/
-    state_service.py    # initialize state, process_new_workout
-  scripts/
-    seed_exercises.py   # optional exercise library seed (see below)
-  main.py               # FastAPI 0.2.0 — preferred app
-
-main.py                 # Legacy FastAPI 0.1.0 — running + program endpoints
-alembic.ini
-alembic/
-  env.py
-  README
-requirements.txt
-LICENSE
-README.md
-```
-
-**Seed exercises (optional):** after the database schema exists, from the repo root:
-
-```bash
-python -m app.scripts.seed_exercises
-```
-
----
-
-## Requirements
-
-- Python 3.11+
-- Postgres for async SQLAlchemy (required for auth, state persistence, and JWT-protected v1 routes)
-- `pip` and a virtual environment (recommended)
-
----
-
-## Setup
-
-```bash
-git clone https://github.com/<your-user>/perf-lab-api.git
+git clone https://github.com/markwuenschel-dev/perf-lab-api.git
 cd perf-lab-api
+cp .env.example .env          # set SECRET_KEY + DATABASE_URL
 
-uv sync --extra dev          # creates .venv and installs runtime + dev deps
-```
-
-Prefix commands with `uv run` (e.g. `uv run pytest -q`), or activate the venv it created:
-
-```bash
-# Windows PowerShell
-. .\.venv\Scripts\Activate.ps1
-# macOS/Linux
-source .venv/bin/activate
-```
-
-> Do **not** use `pip install -r requirements.txt`. That file is legacy: it both omits real
-> runtime deps (`kagglehub`, `aiofiles`) and pulls in things the default runtime must not
-> have — Celery/Redis/slowapi, which [ADR-0027](docs/adr/0027-background-job-scheduler.md)
-> keeps optional under the `[tasks]` extra, plus the `[llm]` SDKs.
-> [`pyproject.toml`](pyproject.toml) + [`uv.lock`](uv.lock) are the source of truth.
-
-Copy `.env.example` to `.env` and fill in your values (see **Environment variables**). For anything beyond `simulate-dose`, ensure Postgres is running and `DATABASE_URL` points at your database. Then create and seed the schema:
-
-```bash
+docker compose up -d postgres # user perfuser / db perflab / port 5432
+uv sync --extra dev
 uv run alembic upgrade head
 uv run python -m app.scripts.seed_exercises
+
+uv run uvicorn app.main:app --reload
+# http://127.0.0.1:8000/docs    http://127.0.0.1:8000/ping
 ```
-
----
-
-## Running the API
-
-**Recommended (only supported entrypoint):**
 
 ```bash
-uvicorn app.main:app --reload
+cd web
+pnpm install
+pnpm run dev                  # Vite console, talks to the API
 ```
 
-Then open:
+Do **not** `pip install -r requirements.txt`. [`pyproject.toml`](pyproject.toml) + [`uv.lock`](uv.lock) are the source of truth. The root `main.py` entrypoint is deprecated — use `app.main:app`.
 
-- Docs: http://127.0.0.1:8000/docs
-- Health: http://127.0.0.1:8000/ping
+Production refuses to boot on a published `SECRET_KEY`, unpinned CORS, or `DEBUG=true`. Pin `ALLOWED_ORIGINS`. See [`docs/DEPLOY.md`](docs/DEPLOY.md).
 
-The root `main.py` entrypoint is deprecated and should no longer be used.
+---
 
-**Production-style:**
+## Verify
 
 ```bash
-uvicorn app.main:app --host 0.0.0.0 --port 8000
+uv run python -c "import app.main; print('ok')"
+uv run python -m app.scripts.export_openapi --check
+uv run ruff check .
+uv run pyright
+uv run pytest -q -n auto
+
+cd web
+pnpm run tokens:check
+pnpm run test
+pnpm run build
 ```
 
-CORS allows local dev origins by default. In production you **must** pin an explicit
-prod origin via `ALLOWED_ORIGINS` (e.g. `https://perflab.44-198-76-44.nip.io`) — the app
-refuses to boot otherwise (INT-09). `ALLOWED_ORIGIN_REGEX` is disabled by default and is
-refused outright in production (INT-A1) — pin explicit origins instead.
+CI runs the same gates on every PR ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)): app import, committed OpenAPI, pytest with `--cov-fail-under=83`, ruff, pyright, `types.gen.ts` freshness, token check, `tsc` + Vite build, vitest.
 
 ---
 
-## Endpoints
+## Docs
 
-### `app.main:app`
-
-**Public**
-
-- `GET /ping` — Healthcheck
-- `POST /v1/simulate-dose` — Body: `WorkoutLog` → `StressDose` (no JWT)
-
-**Auth (no `/v1` prefix; OAuth2-compatible token URL)**
-
-- `POST /auth/register` — JSON: `email`, `password` → creates user + empty `AthleteProfile`
-- `POST /auth/token` — Form: `username` (email), `password` → `access_token` + `token_type: bearer`
-- `GET /auth/me` — Header: `Authorization: Bearer <token>` → current user
-
-**JWT required** (`Authorization: Bearer <token>`)
-
-- `POST /v1/onboard` — Create athlete profile + seed baseline state in one call
-- `POST /v1/log-workout` — Body: `WorkoutLog` → updates state → `UnifiedStateVector`
-- `GET /v1/next-session?goal=...` — `Strength` | `Hypertrophy` | `Power` | `General` → `WorkoutPrescription`
-- `POST /v1/planning/blocks` — Create mesocycle block (auto-generates session calendar)
-- `GET /v1/planning/blocks` — List blocks for current user
-- `PATCH /v1/planning/blocks/{id}` — Update block
-- `GET /v1/planning/sessions` — List planned sessions
-- `GET /v1/planning/today` — Today's session slot with prescription context
-- `GET /v1/benchmarks/definitions` — Benchmark definition library
-- `POST /v1/benchmarks/observations` — Record a benchmark result (triggers KPI recompute)
-- `GET /v1/dashboard/bundle` — KPI bundle + domain readiness for current user
-
-### `main:app` (legacy only)
-
-- `POST /compute-metrics` — Running metrics from 300m + 1.5-mile inputs
-- `GET /program/run` — 10-week running program
-- `GET /program/strength` — Strength track outline
-
----
-
-## Environment variables
-
-Defined in [`app/core/config.py`](app/core/config.py) (`.env` supported):
-
-| Variable | Purpose |
-|----------|---------|
-| `PROJECT_NAME` | API title (default: `Performance Lab API`) |
-| `API_V1_STR` | v1 prefix (default: `/v1`) |
-| `DATABASE_URL` | Async Postgres URL, e.g. `postgresql+asyncpg://postgres:postgres@localhost/perf_lab`. A plain `postgresql://` or `postgres://` URL (as some managed Postgres providers inject) is rewritten to `postgresql+asyncpg://` at startup so `asyncpg` is used. |
-| `ENVIRONMENT` | Deployment environment (default: `development`). Set `ENVIRONMENT=production` in real deployments — the boot guards below **only fail closed when this is set**; anything other than `production`/`prod` is treated as non-production and they merely warn. |
-| `DEBUG` | Drives SQLAlchemy `echo` (default: `False`). **Refused in production** — `echo` logs every statement *and its bound parameters*, which puts `hashed_password` and wearable OAuth token ciphertext in the application log. Leave it off unless you are reading queries on a dev box. |
-| `SECRET_KEY` | JWT signing secret — **required in production** (generate e.g. `openssl rand -hex 32`). Production refuses to boot on any key this repo publishes (including the one in `.env.example` — copying that file is not enough), on an empty key, or on anything shorter than 32 chars. |
-| `ALLOWED_ORIGINS` | Comma-separated CORS origins (default: the local-dev Vite origins). **Production must pin at least one explicit prod origin** and refuses to boot on the dev defaults alone, or on the CORS spec's non-origin values (`*`, `null`). |
-| `ALLOWED_ORIGIN_REGEX` | Regex origin matching (default: disabled). **Not accepted in production at all** — pin explicit origins via `ALLOWED_ORIGINS` instead. Warns in local dev. |
-| `ALGORITHM` | JWT algorithm (default: `HS256`) |
-| `ACCESS_TOKEN_EXPIRE_MINUTES` | Access token lifetime (default: 7 days) |
-
-> The `SECRET_KEY`, `ALLOWED_ORIGINS`/`ALLOWED_ORIGIN_REGEX`, and `DEBUG` rules are enforced
-> at startup by `app/main.py` (`_check_production_secrets`, `_check_production_cors`,
-> `_check_production_debug`): a production boot **raises** rather than serving traffic on an
-> unsafe config. Outside production they log a warning instead.
-
----
-
-## Database and migrations
-
-- Async engine and sessions: [`app/core/db.py`](app/core/db.py)
-- Alembic targets `Base.metadata` with all models loaded from [`app/models/__init__.py`](app/models/__init__.py)
-- Three migrations ship with the repo — run `alembic upgrade head` on a fresh database
-
-```bash
-alembic upgrade head
-python -m app.scripts.seed_exercises   # loads 290+ exercise library rows (idempotent)
-```
-
----
-
-## Tests
-
-143 tests across unit, ORM persistence, and end-to-end flows. Run with:
-
-```bash
-pytest -q
-pytest --cov=app
-```
-
----
-
-## Code quality
-
-```bash
-ruff check .
-black .
-isort .
-pyright
-```
-
----
-
-## Conceptual model (detailed)
-
-1. **Input** — Athlete logs sessions/tests.
-2. **Stress dose** — Map logs to `D(t)` (metabolic, neuromuscular, structural).
-3. **State update** — `S(t-1)` → `S(t)` with multi-timescale decay/adaptation and cross-talk.
-4. **(Future)** Data assimilation — e.g. EKF for drift and individualization.
-5. **Prescription** — Next workout from goal and constraints.
+| | |
+|---|---|
+| [Architecture](docs/System_Architecture.md) | Runtime, routers, the `S(t)` loop |
+| [ADRs](docs/adr/) | Settled engineering decisions |
+| [PDRs](docs/pdr/) | Settled product thesis |
+| [Redesign roadmap](docs/REDESIGN_ROADMAP.md) | Wave 2 phases (P6/P8/P9 shipped) |
+| [Deploy](docs/DEPLOY.md) | EC2 docker-compose runbook |
+| [CONTEXT.md](CONTEXT.md) | Domain vocabulary — read this before changing engine code |
 
 ---
 
 ## License
 
 MIT — see [LICENSE](LICENSE).
-
----
-
-## Changelog
-
-- **2026-05-24:** README synced to v0.3 — Alembic migrations live, 143 tests, all planning/benchmark/dashboard routes documented, exercise seed step added.
-- **2026-04-03:** README aligned with JWT auth, dual entrypoints, Alembic layout, expanded models/services, and sibling `perf-lab-web` repo.
-- **2025-11-21:** Earlier documentation pass (stack, structure, setup, env, endpoints).
