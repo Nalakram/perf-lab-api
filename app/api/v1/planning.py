@@ -9,7 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
-from app.models.mesocycle import MesocycleBlock, PlannedSession, SessionStatus
+from app.models.mesocycle import MesocycleBlock, PlannedSession
 from app.models.user import User
 from app.schemas.planning import (
     BlockCreateRequest,
@@ -115,19 +115,18 @@ async def update_session(
     if not session:
         raise HTTPException(status_code=404, detail="Session not found")
 
-    # A genuine date move preserves the original plan date (first move only) and,
-    # unless the caller set an explicit status, marks the session RESCHEDULED.
-    moved = False
+    # A genuine date move preserves the original plan date (first move only). It does
+    # NOT change lifecycle status: the auto-transition to RESCHEDULED used to make the
+    # session permanently undiscoverable, because both resolvers filter on PENDING
+    # (planning_service.get_today_session, state_service._match_planned_session) and
+    # nothing ever writes a session back to PENDING. See ADR-0069.
     if body.scheduled_date is not None and body.scheduled_date != session.scheduled_date:
         if session.original_scheduled_date is None:
             session.original_scheduled_date = session.scheduled_date
         session.scheduled_date = body.scheduled_date
-        moved = True
 
     if body.status is not None:
         session.status = body.status
-    elif moved:
-        session.status = SessionStatus.RESCHEDULED
 
     await db.commit()
     await db.refresh(session)
