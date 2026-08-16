@@ -157,26 +157,85 @@ async def test_list_recent_workouts_newest_first_limited_and_scoped(async_db):
     assert len(await repo.list_recent_workouts(b.id, limit=10)) == 1  # scoped
 
 
-async def test_load_recent_workouts_loader_matches_the_repository(async_db):
-    """``state_service.load_recent_workouts`` is the route's delegate: same rows, same order.
+def _distinct_workout(user_id: int, when: datetime, n: int) -> WorkoutLog:
+    """A workout whose every ``WorkoutLogSummary`` field carries a value unique to ``n``.
 
-    The loader is the single seam the ``/v1/workouts`` route goes through, so it must carry
-    the repository's contract (newest first, limited, athlete-scoped) unchanged.
+    The loader-vs-repository comparison below is only as strong as the data it runs on: if
+    every seeded row shared a modality/duration/RPE, a projection that read the wrong row —
+    or the wrong field — would still compare equal on all but ``logged_at``. Varying every
+    field makes each assertion able to fail independently.
+    """
+    return WorkoutLog(
+        user_id=user_id,
+        logged_at=when,
+        session_timestamp=when + timedelta(minutes=n),
+        modality=f"Modality-{n}",
+        duration_minutes=30.0 + n,
+        session_rpe=5.0 + n * 0.5,
+        distance_meters=100.0 * n,
+        total_volume_load=1000.0 + n,
+        is_benchmark=bool(n % 2),
+    )
+
+
+async def test_load_recent_workouts_loader_matches_the_repository(async_db):
+    """``state_service.load_recent_workouts`` returns exactly the repository's rows, projected.
+
+    Calls ``AthleteContextRepository.list_recent_workouts`` and the loader against the same
+    seeded data, same user, same limit, and asserts row-for-row correspondence.
+
+    The two sides are not directly comparable objects: the repository returns ``WorkoutLog``
+    ORM rows and the loader returns ``WorkoutLogSummary`` schema objects, so the comparison
+    projects the schema side onto its source row — for each field in
+    ``WorkoutLogSummary.model_fields``, the loader's value must equal that attribute on the
+    paired ORM row. The field list is derived from the model rather than hand-listed, so a
+    field added to the schema later is compared automatically instead of silently escaping.
+    Reading the expected values off the ORM row (not off literals, and not by re-running the
+    loader's own projection) is what makes this a check of the loader against the repository
+    rather than a restatement of the loader's implementation.
+
+    Also holds the loader to the repository's ordering, limit, and athlete scoping.
     """
     a = await _mk_user(async_db, "hist_loader_a@test.com")
     b = await _mk_user(async_db, "hist_loader_b@test.com")
-    for d in [0, 1, 2]:
-        async_db.add(_workout(a.id, _T0 + timedelta(days=d)))
-    async_db.add(_workout(b.id, _T0))
+    for n, d in enumerate([0, 1, 2]):
+        async_db.add(_distinct_workout(a.id, _T0 + timedelta(days=d), n + 1))
+    async_db.add(_distinct_workout(b.id, _T0, 9))
     await async_db.commit()
 
+    repo_rows = await AthleteContextRepository(async_db).list_recent_workouts(a.id, limit=2)
     loaded = await state_service.load_recent_workouts(async_db, a.id, 2)
-    assert [w.logged_at for w in loaded] == [
+
+    # Same number of rows, and the same rows in the same order (identity via primary key).
+    assert len(loaded) == len(repo_rows) == 2
+    assert [s.id for s in loaded] == [r.id for r in repo_rows]
+
+    # Row-for-row, field-for-field: every WorkoutLogSummary field matches its source row.
+    compared: set[str] = set()
+    for summary, row in zip(loaded, repo_rows, strict=True):
+        for field in WorkoutLogSummary.model_fields:
+            assert getattr(summary, field) == getattr(row, field), (
+                f"loader/repository mismatch on {field!r} for workout id={row.id}: "
+                f"loader={getattr(summary, field)!r} repository={getattr(row, field)!r}"
+            )
+            compared.add(field)
+    # Guard the comparison: prove it actually visited every field of the schema.
+    assert compared == set(WorkoutLogSummary.model_fields)
+
+    # Ordering is the repository's contract, restated on the loader's own output.
+    assert [s.logged_at for s in loaded] == [
         _T0 + timedelta(days=2),
         _T0 + timedelta(days=1),
     ]
-    assert len(await state_service.load_recent_workouts(async_db, b.id, 10)) == 1  # scoped
-    assert await state_service.load_recent_workouts(async_db, b.id + 999, 10) == []
+
+    # Athlete scoping and the empty case, both loader-vs-repository.
+    b_rows = await AthleteContextRepository(async_db).list_recent_workouts(b.id, limit=10)
+    b_loaded = await state_service.load_recent_workouts(async_db, b.id, 10)
+    assert [s.id for s in b_loaded] == [r.id for r in b_rows] == [b_rows[0].id]
+
+    absent = b.id + 999
+    assert await AthleteContextRepository(async_db).list_recent_workouts(absent, limit=10) == []
+    assert await state_service.load_recent_workouts(async_db, absent, 10) == []
 
 
 async def _register_and_get_token(client, email: str, password: str) -> str:
