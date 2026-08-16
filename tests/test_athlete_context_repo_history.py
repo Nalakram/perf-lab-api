@@ -7,6 +7,7 @@ athlete scoping, and empty-result behavior.
 from datetime import datetime, timedelta
 
 import pytest
+from sqlalchemy import select
 
 from app.domain.vectors import FatigueState
 from app.engine.simulate import baseline_state
@@ -15,6 +16,7 @@ from app.models.athlete_state import AthleteState
 from app.models.user import User
 from app.models.workout_log import WorkoutLog
 from app.repositories.athlete_context_repository import AthleteContextRepository
+from app.schemas.history import WorkoutLogSummary
 from app.services import state_service
 
 pytestmark = pytest.mark.asyncio
@@ -153,3 +155,96 @@ async def test_list_recent_workouts_newest_first_limited_and_scoped(async_db):
     assert logged == sorted(logged, reverse=True)  # newest first
     assert logged[0] == _T0 + timedelta(days=2)
     assert len(await repo.list_recent_workouts(b.id, limit=10)) == 1  # scoped
+
+
+async def test_load_recent_workouts_loader_matches_the_repository(async_db):
+    """``state_service.load_recent_workouts`` is the route's delegate: same rows, same order.
+
+    The loader is the single seam the ``/v1/workouts`` route goes through, so it must carry
+    the repository's contract (newest first, limited, athlete-scoped) unchanged.
+    """
+    a = await _mk_user(async_db, "hist_loader_a@test.com")
+    b = await _mk_user(async_db, "hist_loader_b@test.com")
+    for d in [0, 1, 2]:
+        async_db.add(_workout(a.id, _T0 + timedelta(days=d)))
+    async_db.add(_workout(b.id, _T0))
+    await async_db.commit()
+
+    loaded = await state_service.load_recent_workouts(async_db, a.id, 2)
+    assert [w.logged_at for w in loaded] == [
+        _T0 + timedelta(days=2),
+        _T0 + timedelta(days=1),
+    ]
+    assert len(await state_service.load_recent_workouts(async_db, b.id, 10)) == 1  # scoped
+    assert await state_service.load_recent_workouts(async_db, b.id + 999, 10) == []
+
+
+async def _register_and_get_token(client, email: str, password: str) -> str:
+    """Register a user and return a Bearer token string (pattern from test_dashboard_routes)."""
+    reg = await client.post("/auth/register", json={"email": email, "password": password})
+    assert reg.status_code == 201, reg.text
+    tok = await client.post(
+        "/auth/token",
+        data={"username": email, "password": password},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert tok.status_code == 200, tok.text
+    return tok.json()["access_token"]
+
+
+async def test_get_workouts_route_returns_summaries_most_recent_first(http_client, async_db):
+    """GET /v1/workouts: 200 + the athlete's own workout summaries, newest first.
+
+    Locks the wire contract of the route across the delegation change — the handler now calls
+    ``state_service.load_recent_workouts`` instead of building the repository itself, and the
+    payload must be identical.
+    """
+    email = "hist_route_wko@test.com"
+    token = await _register_and_get_token(http_client, email, "securepass1")
+    me = (await async_db.execute(select(User).where(User.email == email))).scalar_one()
+
+    other = await _mk_user(async_db, "hist_route_other@test.com")
+    for d in [0, 2, 1]:  # inserted out of order on purpose
+        async_db.add(_workout(me.id, _T0 + timedelta(days=d)))
+    async_db.add(_workout(other.id, _T0 + timedelta(days=5)))
+    await async_db.commit()
+
+    resp = await http_client.get(
+        "/v1/workouts", headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert isinstance(body, list)
+    assert len(body) == 3  # athlete-scoped: the other user's workout is absent
+
+    logged = [datetime.fromisoformat(w["logged_at"]) for w in body]
+    assert logged == [
+        _T0 + timedelta(days=2),
+        _T0 + timedelta(days=1),
+        _T0,
+    ]
+    first = body[0]
+    assert set(WorkoutLogSummary.model_fields) <= set(first)
+    assert first["modality"] == "Mixed"
+    assert first["duration_minutes"] == 30.0
+    assert first["session_rpe"] == 5.0
+
+
+async def test_get_workouts_route_respects_limit(http_client, async_db):
+    """The route's ``limit`` query param still reaches the repository through the loader."""
+    email = "hist_route_limit@test.com"
+    token = await _register_and_get_token(http_client, email, "securepass1")
+    me = (await async_db.execute(select(User).where(User.email == email))).scalar_one()
+    for d in [0, 1, 2, 3]:
+        async_db.add(_workout(me.id, _T0 + timedelta(days=d)))
+    await async_db.commit()
+
+    resp = await http_client.get(
+        "/v1/workouts", params={"limit": 2}, headers={"Authorization": f"Bearer {token}"}
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert [datetime.fromisoformat(w["logged_at"]) for w in body] == [
+        _T0 + timedelta(days=3),
+        _T0 + timedelta(days=2),
+    ]
