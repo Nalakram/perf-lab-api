@@ -2856,10 +2856,7 @@ export interface components {
         };
         /** TodaySessionResponse */
         TodaySessionResponse: {
-            /** Prescription */
-            prescription?: {
-                [key: string]: unknown;
-            } | null;
+            prescription?: components["schemas"]["WorkoutPrescription"] | null;
             session: components["schemas"]["PlannedSessionRead"] | null;
         };
         /** TokenResponse */

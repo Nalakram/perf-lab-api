@@ -6,6 +6,7 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 from app.models.mesocycle import BlockGoal, BlockStatus, SessionStatus
+from app.schemas.prescription import WorkoutPrescription
 
 
 class WeeklyTemplateSlot(BaseModel):
@@ -91,5 +92,14 @@ class PlannedSessionUpdateRequest(BaseModel):
 
 class TodaySessionResponse(BaseModel):
     session: PlannedSessionRead | None
-    prescription: dict[str, Any] | None = None
+    # The route already sends a serialized WorkoutPrescription here — it builds this
+    # field from `rx.to_prescribed_content()`, which is exactly `rx.model_dump()`
+    # (app/schemas/prescription.py). Declaring the model makes the published contract
+    # match what the wire has always carried, and matches /v1/next-session, which has
+    # declared `response_model=WorkoutPrescription` all along (app/api/v1/prescribe.py).
+    #
+    # Deliberately NOT applied to `PlannedSessionRead.prescribed_content` above: that
+    # field reflects persisted historical JSONB, which is not proven to satisfy this
+    # model, so typing it would turn a contract cleanup into a runtime behaviour change.
+    prescription: WorkoutPrescription | None = None
 

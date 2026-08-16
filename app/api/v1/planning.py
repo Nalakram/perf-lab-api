@@ -156,5 +156,13 @@ async def get_today(
     await db.refresh(session)
     return TodaySessionResponse(
         session=PlannedSessionRead.model_validate(session, from_attributes=True),
-        prescription=rx.to_prescribed_content(),
+        # `prescription` is declared as WorkoutPrescription, so hand over the model
+        # itself rather than flattening it first. While the field was `dict[str, Any]`,
+        # `to_prescribed_content()` (== `model_dump()`) turned the model into an untyped
+        # dict that the contract then published as a bare object — nothing validated it
+        # on the way out, which is exactly what this change fixes. The serialized payload
+        # is the same either way; `to_prescribed_content` keeps its one real job,
+        # persisting into PlannedSession.prescribed_content, which prescribe_for_athlete
+        # already did above.
+        prescription=rx,
     )

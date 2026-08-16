@@ -4986,14 +4986,12 @@
           "prescription": {
             "anyOf": [
               {
-                "additionalProperties": true,
-                "type": "object"
+                "$ref": "#/components/schemas/WorkoutPrescription"
               },
               {
                 "type": "null"
               }
-            ],
-            "title": "Prescription"
+            ]
           },
           "session": {
             "anyOf": [

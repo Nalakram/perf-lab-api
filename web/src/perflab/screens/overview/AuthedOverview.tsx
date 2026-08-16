@@ -18,7 +18,6 @@ import type {
   MacrocycleRead,
   ObjectiveRead,
   OverviewMetrics,
-  PrescriptionExplanation,
   ReadinessScore,
   StateHistorySnapshotRead,
   TodaySessionResponse,
@@ -74,15 +73,12 @@ const SIGNAL_LABELS: Record<string, string> = {
 };
 const signalLabel = (s: string) => SIGNAL_LABELS[s] ?? s.replace(/_/g, " ");
 
-/** The loosely-typed prescription dict off TodaySessionResponse. */
-type PrescDict = {
-  focus?: string;
-  rationale?: string;
-  type?: string;
-  duration_min?: number;
-  exercises?: unknown[];
-  why?: PrescriptionExplanation | null;
-};
+// The hand-rolled local prescription shape that used to live here is gone.
+// `/v1/planning/today` now declares `prescription` as `WorkoutPrescription | null`
+// in openapi.json, so `TodaySessionResponse["prescription"]` in types.gen.ts is the
+// generated model and the casts that used to sit on it became unnecessary. Do not
+// reintroduce a local type for this field — a hand-written duplicate cannot
+// drift-check against the contract, which is exactly how the old one went stale.
 
 export function AuthedOverview() {
   const { state, actions } = usePerfLab();
@@ -325,7 +321,7 @@ function RecommendedToday({
 }) {
   const data = resourceData(resource);
   const session = data ? data.session : null;
-  const presc = (data ? data.prescription : null) as PrescDict | null;
+  const presc = (data ? data.prescription : null) ?? null;
   const hasContent = !!session || !!presc;
 
   if (!hasContent) {
@@ -539,7 +535,7 @@ function InsightsCard({
   }
 
   const today = resourceData(todayRes);
-  const why = ((today ? today.prescription : null) as PrescDict | null)?.why ?? null;
+  const why = (today ? today.prescription : null)?.why ?? null;
   (why?.constraints_applied ?? []).forEach((c) => insights.push({ dot: COLORS.warn, title: "Constraint applied", desc: c }));
   (why?.warnings ?? []).forEach((wn) => insights.push({ dot: COLORS.hot, title: "Heads up", desc: wn }));
 
