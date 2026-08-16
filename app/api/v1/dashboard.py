@@ -5,10 +5,8 @@ from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.models.user import User
 from app.schemas.dashboard import (
-    AnchorObservationOut,
     DashboardBundleOut,
     DomainSummaryOut,
-    KPIValueOut,
     OverviewMetrics,
     ReadinessOut,
 )
@@ -22,11 +20,8 @@ async def get_dashboard_kpis(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DashboardBundleOut:
-    kpis_raw, anchors_raw = await dashboard_service.dashboard_kpis_bundle(db, current_user.id)
-    return DashboardBundleOut(
-        kpis=[KPIValueOut(**k) for k in kpis_raw],
-        primary_anchors=[AnchorObservationOut(**a) for a in anchors_raw],
-    )
+    kpis, anchors = await dashboard_service.dashboard_kpis_bundle(db, current_user.id)
+    return DashboardBundleOut(kpis=kpis, primary_anchors=anchors)
 
 
 @router.get("/domain-summary", response_model=DomainSummaryOut)
@@ -35,14 +30,8 @@ async def get_domain_summary(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> DomainSummaryOut:
-    kpis_raw, anchors_raw = await dashboard_service.domain_summary(
-        db, current_user.id, domain=domain
-    )
-    return DomainSummaryOut(
-        domain=domain,
-        kpis=[KPIValueOut(**k) for k in kpis_raw],
-        primary_anchors=[AnchorObservationOut(**a) for a in anchors_raw],
-    )
+    kpis, anchors = await dashboard_service.domain_summary(db, current_user.id, domain=domain)
+    return DomainSummaryOut(domain=domain, kpis=kpis, primary_anchors=anchors)
 
 
 @router.get("/overview", response_model=OverviewMetrics)
