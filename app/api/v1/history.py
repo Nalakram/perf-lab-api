@@ -9,6 +9,12 @@ History readiness trend & weekly load, recent sessions) with real data.
 Both reads go through the repository seam + a state_service loader (AUD-C15) —
 the routes no longer own AthleteState query or unified_from_athlete_row
 conversion knowledge (see CONTEXT.md).
+
+No route here constructs a repository: each handler calls exactly one loader
+(load_recent_state_snapshots / load_recent_workouts) and returns what it gets,
+so no ORM row and no persistence handle reaches a handler body. The
+``/v1/workouts`` handler once held ``AthleteContextRepository(db)`` inline,
+which is what tests/test_athlete_state_seam.py now guards against.
 """
 
 from fastapi import APIRouter, Depends, Query
@@ -17,8 +23,6 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.models.user import User
-from app.models.workout_log import WorkoutLog
-from app.repositories.athlete_context_repository import AthleteContextRepository
 from app.schemas.history import WorkoutLogSummary
 from app.schemas.state import StateHistorySnapshotRead
 from app.services import state_service
@@ -46,7 +50,6 @@ async def list_workouts(
     limit: int = Query(50, ge=1, le=365),
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
-) -> list[WorkoutLog]:
+) -> list[WorkoutLogSummary]:
     """The athlete's logged workouts, most recent first."""
-    rows = await AthleteContextRepository(db).list_recent_workouts(current_user.id, limit)
-    return list(rows)
+    return await state_service.load_recent_workouts(db, current_user.id, limit)

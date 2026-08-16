@@ -41,6 +41,7 @@ from app.models.workout_set_log import WorkoutSetLog
 from app.repositories.athlete_context_repository import AthleteContextRepository
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
 from app.schemas.engine_vectors import FatigueState, TissueState
+from app.schemas.history import WorkoutLogSummary
 from app.schemas.state import StateHistorySnapshotRead, UnifiedStateVector
 from app.schemas.workouts import (
     ExerciseEntry,
@@ -310,6 +311,21 @@ async def load_recent_state_snapshots(
         StateHistorySnapshotRead.from_state(unified_from_athlete_row(r), snapshot_id=r.id)
         for r in reversed(rows)
     ]
+
+
+async def load_recent_workouts(
+    db: AsyncSession, user_id: int, limit: int
+) -> list[WorkoutLogSummary]:
+    """The athlete's recent logged workouts as summaries, most recent first.
+
+    The workout-log twin of load_recent_state_snapshots, and the one seam the
+    ``/v1/workouts`` route reads through. Owns both halves of the read — the repository
+    fetch and the row→summary projection — so the route holds no repository handle and no
+    ORM row (CONTEXT.md: repository construction lives in the service layer, and ORM rows
+    stop here rather than travelling into a handler body).
+    """
+    rows = await AthleteContextRepository(db).list_recent_workouts(user_id, limit)
+    return [WorkoutLogSummary.model_validate(r) for r in rows]
 
 
 async def load_or_init_current_state(
