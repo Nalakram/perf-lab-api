@@ -15,7 +15,13 @@ from app.models.derived_metric_snapshot import DerivedMetricSnapshot
 from app.models.mesocycle import PlannedSession, SessionStatus
 from app.models.workout_log import WorkoutLog
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
-from app.schemas.dashboard import AdherenceMetrics, OverviewMetrics, TrainingLoadMetrics
+from app.schemas.dashboard import (
+    AdherenceMetrics,
+    AnchorObservationOut,
+    KPIValueOut,
+    OverviewMetrics,
+    TrainingLoadMetrics,
+)
 from app.schemas.state import UnifiedStateVector
 from app.services.state_service import load_current_state
 
@@ -28,6 +34,18 @@ MIN_HISTORY_DAYS = 14
 SWEET_SPOT_LOW = 0.8
 SWEET_SPOT_HIGH = 1.3
 ADHERENCE_WINDOW_DAYS = 28
+
+# --- Readiness soft-flag thresholds ----------------------------------------
+# The comparison strictness is part of each threshold's meaning and is pinned by
+# tests/test_dashboard_readiness_thresholds.py: a KPI sitting exactly on its
+# threshold raises no flag.
+# ``run_fatigue_factor`` is flagged when STRICTLY ABOVE this.
+RUN_FATIGUE_FACTOR_ELEVATED_ABOVE = 14.0
+# ``pl_relative_total`` (total / bodyweight) is flagged when STRICTLY BELOW this.
+PL_RELATIVE_TOTAL_LOW_BELOW = 3.0
+# ``wl_snatch_cj_ratio`` (snatch as a % of clean & jerk) is flagged when
+# STRICTLY BELOW this.
+WL_SNATCH_CJ_RATIO_LOW_BELOW = 72.0
 
 # Derived metrics that depend on other KPIs must run after their inputs.
 _DERIVED_ORDER: dict[str, int] = {
@@ -197,8 +215,14 @@ async def recompute_derived_metrics(db: AsyncSession, user_id: int) -> tuple[int
 async def dashboard_kpis_bundle(
     db: AsyncSession,
     user_id: int,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Latest KPI rows + latest primary-anchor observations for dashboard."""
+) -> tuple[list[KPIValueOut], list[AnchorObservationOut]]:
+    """Latest KPI rows + latest primary-anchor observations for dashboard.
+
+    Returns the response models themselves rather than untyped dicts: the route
+    is a thin controller that only wraps these in their envelope, so a renamed
+    or dropped field is a type error here instead of a runtime ``**``-splat
+    failure at the boundary.
+    """
     defs_res = await db.execute(
         select(DerivedMetricDefinition).order_by(
             DerivedMetricDefinition.display_priority,
@@ -208,7 +232,7 @@ async def dashboard_kpis_bundle(
     defs = list(defs_res.scalars().all())
     kpi_vals = await latest_kpi_values(db, user_id)
 
-    kpis_out: list[dict[str, Any]] = []
+    kpis_out: list[KPIValueOut] = []
     for d in defs:
         if d.code not in kpi_vals:
             continue
@@ -223,18 +247,18 @@ async def dashboard_kpis_bundle(
         )
         snap = snap_res.scalars().first()
         kpis_out.append(
-            {
-                "code": d.code,
-                "name": d.name,
-                "domain": d.domain,
-                "metric_type": d.metric_type,
-                "unit": d.unit,
-                "value": kpi_vals[d.code],
-                "confidence": float(snap.confidence) if snap and snap.confidence is not None else None,
-                "computed_at": snap.computed_at if snap else datetime.now(UTC).replace(tzinfo=None),
-                "is_dashboard_kpi": d.is_dashboard_kpi,
-                "can_affect_prescriber_rules": d.can_affect_prescriber_rules,
-            }
+            KPIValueOut(
+                code=d.code,
+                name=d.name,
+                domain=d.domain,
+                metric_type=d.metric_type,
+                unit=d.unit,
+                value=kpi_vals[d.code],
+                confidence=float(snap.confidence) if snap and snap.confidence is not None else None,
+                computed_at=snap.computed_at if snap else datetime.now(UTC).replace(tzinfo=None),
+                is_dashboard_kpi=d.is_dashboard_kpi,
+                can_affect_prescriber_rules=d.can_affect_prescriber_rules,
+            )
         )
 
     anchor_res = await db.execute(
@@ -252,21 +276,21 @@ async def dashboard_kpis_bundle(
         if bd.code not in latest_by_code:
             latest_by_code[bd.code] = (obs, bd)
 
-    anchors_out: list[dict[str, Any]] = []
+    anchors_out: list[AnchorObservationOut] = []
     for obs, bd in latest_by_code.values():
         anchors_out.append(
-            {
-                "benchmark_code": bd.code,
-                "name": bd.name,
-                "domain": bd.domain,
-                "is_primary_anchor": bd.is_primary_anchor,
-                "metric_type": bd.metric_type,
-                "unit": bd.unit,
-                "raw_value": obs.raw_value,
-                "observed_at": obs.observed_at,
-            }
+            AnchorObservationOut(
+                benchmark_code=bd.code,
+                name=bd.name,
+                domain=bd.domain,
+                is_primary_anchor=bd.is_primary_anchor,
+                metric_type=bd.metric_type,
+                unit=bd.unit,
+                raw_value=obs.raw_value,
+                observed_at=obs.observed_at,
+            )
         )
-    anchors_out.sort(key=lambda x: (x["domain"], x["benchmark_code"]))
+    anchors_out.sort(key=lambda a: (a.domain, a.benchmark_code))
     return kpis_out, anchors_out
 
 
@@ -274,10 +298,11 @@ async def domain_summary(
     db: AsyncSession,
     user_id: int,
     domain: str,
-) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+) -> tuple[list[KPIValueOut], list[AnchorObservationOut]]:
+    """The dashboard bundle narrowed to a single domain (same rows, filtered)."""
     kpis, anchors = await dashboard_kpis_bundle(db, user_id)
-    dk = [k for k in kpis if k["domain"] == domain]
-    da = [a for a in anchors if a["domain"] == domain]
+    dk = [k for k in kpis if k.domain == domain]
+    da = [a for a in anchors if a.domain == domain]
     return dk, da
 
 
@@ -291,13 +316,13 @@ async def readiness_payload(
     kpi = await latest_kpi_values(db, user_id)
     flags: dict[str, Any] = {}
     ff = kpi.get("run_fatigue_factor")
-    if ff is not None and ff > 14.0:
+    if ff is not None and ff > RUN_FATIGUE_FACTOR_ELEVATED_ABOVE:
         flags["run_fatigue_factor_elevated"] = True
     rt = kpi.get("pl_relative_total")
-    if rt is not None and rt < 3.0:
+    if rt is not None and rt < PL_RELATIVE_TOTAL_LOW_BELOW:
         flags["pl_relative_total_low"] = True
     ratio = kpi.get("wl_snatch_cj_ratio")
-    if ratio is not None and ratio < 72.0:
+    if ratio is not None and ratio < WL_SNATCH_CJ_RATIO_LOW_BELOW:
         flags["wl_snatch_share_low"] = True
     return state, flags
 
