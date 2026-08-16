@@ -767,7 +767,7 @@ Backend-ready, not yet consumed by the reference frontend (`web/`) — real, com
 routes with request/response schemas in `openapi.json`, deliberately kept as intentional
 future surface rather than removed:
 
-- `GET/POST /v1/weak-points/`, `GET/PATCH/DELETE /v1/weak-points/{weak_point_id}`
+- `GET /v1/weak-points/`, `PATCH /v1/weak-points/{weak_point_id}`
 - `POST /v1/feedback`
 - `GET /v1/shadow/summary`
 - `GET /v1/benchmarks/definitions`, `POST /v1/benchmarks/recompute-derived`

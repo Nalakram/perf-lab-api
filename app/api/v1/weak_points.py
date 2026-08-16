@@ -2,12 +2,16 @@
 app/api/v1/weak_points.py
 
 Standalone weak-point management routes.
-Allows the frontend to list, update, and delete weak-point rows
-without going through benchmark observations.
+Allows the frontend to list and update weak-point rows without going
+through benchmark observations.
+
+Weak points are never hard-deleted: resolving one is a PATCH that sets
+`resolved_at` (see docs/Data_Model.md, "Weak-point resolution"). Hard
+deletion would also destroy the `source_session_id` benchmark provenance.
 """
 from datetime import datetime
 
-from fastapi import APIRouter, Depends, HTTPException, Response
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -94,22 +98,3 @@ async def patch_weak_point(
     await db.commit()
     await db.refresh(wp)
     return WeakPointOut.model_validate(wp)
-
-
-@router.delete("/{weak_point_id}", status_code=204)
-async def delete_weak_point(
-    weak_point_id: int,
-    db: AsyncSession = Depends(get_db),
-    current_user: User = Depends(get_current_user),
-) -> Response:
-    """Hard-delete a weak-point row owned by the current user.
-
-    Returns 204 No Content on success, 404 if not found or wrong user.
-    """
-    wp = await WeakPointRepository(db).get_for_user(weak_point_id, current_user.id)
-    if wp is None:
-        raise HTTPException(status_code=404, detail="Weak point not found")
-
-    await db.delete(wp)
-    await db.commit()
-    return Response(status_code=204)

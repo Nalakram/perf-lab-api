@@ -803,13 +803,7 @@ export interface paths {
         get?: never;
         put?: never;
         post?: never;
-        /**
-         * Delete Weak Point
-         * @description Hard-delete a weak-point row owned by the current user.
-         *
-         *     Returns 204 No Content on success, 404 if not found or wrong user.
-         */
-        delete: operations["delete_weak_point_v1_weak_points__weak_point_id__delete"];
+        delete?: never;
         options?: never;
         head?: never;
         /**
@@ -4834,35 +4828,6 @@ export interface operations {
                 content: {
                     "application/json": components["schemas"]["WeakPointOut"][];
                 };
-            };
-            /** @description Validation Error */
-            422: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content: {
-                    "application/json": components["schemas"]["HTTPValidationError"];
-                };
-            };
-        };
-    };
-    delete_weak_point_v1_weak_points__weak_point_id__delete: {
-        parameters: {
-            query?: never;
-            header?: never;
-            path: {
-                weak_point_id: number;
-            };
-            cookie?: never;
-        };
-        requestBody?: never;
-        responses: {
-            /** @description Successful Response */
-            204: {
-                headers: {
-                    [name: string]: unknown;
-                };
-                content?: never;
             };
             /** @description Validation Error */
             422: {
