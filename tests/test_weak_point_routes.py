@@ -4,10 +4,11 @@ Route contract tests for /v1/weak-points endpoints.
 Tests run against a live test database (via async_db fixture from conftest.py).
 DB-dependent tests are skipped automatically when no DB is available.
 
-Six test functions covering all three routes × two status-code paths each:
+Five test functions covering both live routes × two status-code paths each,
+plus one guarding the removed DELETE route:
   GET /v1/weak-points            → 200 (authenticated), 401 (unauthenticated)
   PATCH /v1/weak-points/{id}     → 200 (valid update), 404 (missing id)
-  DELETE /v1/weak-points/{id}    → 204 (success), 404 (missing id)
+  DELETE /v1/weak-points/{id}    → not routable (405); the row must survive
 """
 from datetime import datetime
 
@@ -140,12 +141,19 @@ async def test_patch_weak_point_returns_404_for_missing_id(async_db):
 
 
 # ---------------------------------------------------------------------------
-# DELETE /v1/weak-points/{id}
+# DELETE /v1/weak-points/{id} — removed route
 # ---------------------------------------------------------------------------
 
-async def test_delete_weak_point_returns_204_on_success(async_db):
-    """DELETE /v1/weak-points/{id} returns 204 and removes the row."""
-    user = await _mk_user(async_db, email="wp-delete-204@test.com")
+async def test_delete_weak_point_is_not_routable(async_db):
+    """DELETE /v1/weak-points/{id} is not a route: the row must survive the request.
+
+    The weak-point lifecycle is PATCH-only (docs/Data_Model.md, "Weak-point
+    resolution"): resolving sets `resolved_at`, nothing hard-deletes. The path
+    still exists for PATCH, so Starlette matches the path and rejects the
+    method with 405 rather than 404 — assert the exact status, and assert the
+    row is still there so a future re-introduction of the handler cannot pass.
+    """
+    user = await _mk_user(async_db, email="wp-delete-gone@test.com")
     wp = await _mk_weak_point(async_db, user.id)
 
     async def _override_db():
@@ -160,27 +168,9 @@ async def test_delete_weak_point_returns_204_on_success(async_db):
     try:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
             resp = await client.delete(f"/v1/weak-points/{wp.id}")
-        assert resp.status_code == 204, resp.text
-    finally:
-        app.dependency_overrides.clear()
+        assert resp.status_code == 405, resp.text
 
-
-async def test_delete_weak_point_returns_404_for_missing_id(async_db):
-    """DELETE /v1/weak-points/99999 returns 404 when the row does not exist."""
-    user = await _mk_user(async_db, email="wp-delete-404@test.com")
-
-    async def _override_db():
-        yield async_db
-
-    async def _override_user():
-        return user
-
-    app.dependency_overrides[get_db] = _override_db
-    app.dependency_overrides[get_current_user] = _override_user
-
-    try:
-        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
-            resp = await client.delete("/v1/weak-points/99999")
-        assert resp.status_code == 404, resp.text
+        still_there = await async_db.get(WeakPoint, wp.id)
+        assert still_there is not None, "DELETE must not remove the row"
     finally:
         app.dependency_overrides.clear()
