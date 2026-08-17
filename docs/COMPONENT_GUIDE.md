@@ -209,7 +209,7 @@ Session actions:
 
 - Complete -> `status: "completed"`
 - Skip -> `status: "skipped"`
-- +1 day -> `status: "rescheduled"`, `scheduled_date + 1`
+- +1 day -> `scheduled_date + 1`; status left unchanged (ADR-0069)
 
 Render sections:
 

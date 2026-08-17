@@ -287,7 +287,7 @@ Session actions:
 
 - complete -> patch status completed
 - skip -> patch status skipped
-- +1 day -> patch status rescheduled and scheduled_date +1
+- +1 day -> patch scheduled_date +1; status is left unchanged (ADR-0069)
 
 The planning UI displays:
 
