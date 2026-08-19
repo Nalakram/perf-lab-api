@@ -16,12 +16,17 @@ from datetime import date
 
 import pytest
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import select
+from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.orm import sessionmaker
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.main import app
+from app.models.mesocycle import MesocycleBlock
 from app.models.user import AthleteProfile, User
 from app.services.state_service import initialize_athlete_state
+from tests.conftest import TEST_DATABASE_URL
 
 pytestmark = pytest.mark.asyncio
 
@@ -160,11 +165,25 @@ async def test_full_field_update_persists_and_returns_every_field(async_db):
             assert body["modality_mix"] == {"strength": 1.0}
             assert body["deload_volume_factor"] == 0.5
 
-            # Persisted, not just echoed — a fresh GET reflects the same state.
-            listed = await client.get("/v1/planning/blocks")
-            assert listed.status_code == 200
-            updated = next(b for b in listed.json() if b["id"] == block["id"])
-            assert updated["status"] == "completed"
-            assert updated["rationale"] == "full update"
+            # Persisted, not just mutated-in-memory. `async_db`'s session (shared by
+            # this whole test via the dependency override) has expire_on_commit=False,
+            # so a same-session GET reflects the identity-mapped in-memory object
+            # regardless of whether db.commit() actually reached Postgres — it cannot
+            # tell "committed" apart from "mutated and never persisted". A genuinely
+            # independent session/connection is required to prove persistence.
+            engine = create_async_engine(TEST_DATABASE_URL, echo=False)
+            try:
+                factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+                async with factory() as fresh_session:
+                    result = await fresh_session.execute(
+                        select(MesocycleBlock).where(MesocycleBlock.id == block["id"])
+                    )
+                    persisted = result.scalars().one()
+                    assert persisted.status.value == "completed"
+                    assert persisted.rationale == "full update"
+                    assert persisted.modality_mix == {"strength": 1.0}
+                    assert persisted.deload_volume_factor == 0.5
+            finally:
+                await engine.dispose()
     finally:
         app.dependency_overrides.clear()
