@@ -4,7 +4,6 @@ from datetime import date
 from typing import cast
 
 from fastapi import APIRouter, Depends, HTTPException, Query
-from sqlalchemy import and_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
@@ -20,6 +19,7 @@ from app.schemas.planning import (
     TodaySessionResponse,
 )
 from app.schemas.training_goals import TRAINING_GOAL_DEFAULT, TrainingGoal
+from app.services import planning_service
 from app.services.planning_service import create_block_with_sessions, get_today_session
 from app.services.prescription_service import prescribe_for_athlete
 
@@ -40,12 +40,7 @@ async def list_blocks(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[MesocycleBlock]:
-    result = await db.execute(
-        select(MesocycleBlock)
-        .where(MesocycleBlock.user_id == current_user.id)
-        .order_by(MesocycleBlock.created_at.desc())
-    )
-    return list(result.scalars().all())
+    return await planning_service.list_blocks(db, current_user.id)
 
 
 @router.patch("/blocks/{block_id}", response_model=BlockRead)
@@ -55,27 +50,9 @@ async def update_block(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> MesocycleBlock:
-    result = await db.execute(
-        select(MesocycleBlock).where(
-            and_(
-                MesocycleBlock.id == block_id,
-                MesocycleBlock.user_id == current_user.id,
-            )
-        )
-    )
-    block = result.scalars().first()
-    if not block:
+    block = await planning_service.update_block(db, current_user.id, block_id, body)
+    if block is None:
         raise HTTPException(status_code=404, detail="Block not found")
-    if body.status is not None:
-        block.status = body.status
-    if body.rationale is not None:
-        block.rationale = body.rationale
-    if body.modality_mix is not None:
-        block.modality_mix = body.modality_mix
-    if body.deload_volume_factor is not None:
-        block.deload_volume_factor = body.deload_volume_factor
-    await db.commit()
-    await db.refresh(block)
     return block
 
 
@@ -86,14 +63,7 @@ async def list_sessions(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> list[PlannedSession]:
-    stmt = select(PlannedSession).where(PlannedSession.user_id == current_user.id)
-    if start_date:
-        stmt = stmt.where(PlannedSession.scheduled_date >= start_date)
-    if end_date:
-        stmt = stmt.where(PlannedSession.scheduled_date <= end_date)
-    stmt = stmt.order_by(PlannedSession.scheduled_date.asc(), PlannedSession.id.asc())
-    result = await db.execute(stmt)
-    return list(result.scalars().all())
+    return await planning_service.list_sessions(db, current_user.id, start_date, end_date)
 
 
 @router.patch("/sessions/{session_id}", response_model=PlannedSessionRead)
@@ -103,33 +73,9 @@ async def update_session(
     db: AsyncSession = Depends(get_db),
     current_user: User = Depends(get_current_user),
 ) -> PlannedSession:
-    result = await db.execute(
-        select(PlannedSession).where(
-            and_(
-                PlannedSession.id == session_id,
-                PlannedSession.user_id == current_user.id,
-            )
-        )
-    )
-    session = result.scalars().first()
-    if not session:
+    session = await planning_service.update_session(db, current_user.id, session_id, body)
+    if session is None:
         raise HTTPException(status_code=404, detail="Session not found")
-
-    # A genuine date move preserves the original plan date (first move only). It does
-    # NOT change lifecycle status: the auto-transition to RESCHEDULED used to make the
-    # session permanently undiscoverable, because both resolvers filter on PENDING
-    # (planning_service.get_today_session, state_service._match_planned_session) and
-    # nothing ever writes a session back to PENDING. See ADR-0069.
-    if body.scheduled_date is not None and body.scheduled_date != session.scheduled_date:
-        if session.original_scheduled_date is None:
-            session.original_scheduled_date = session.scheduled_date
-        session.scheduled_date = body.scheduled_date
-
-    if body.status is not None:
-        session.status = body.status
-
-    await db.commit()
-    await db.refresh(session)
     return session
 
 
