@@ -15,7 +15,12 @@ from app.models.mesocycle import (
     SessionStatus,
 )
 from app.models.objective import Objective
-from app.schemas.planning import BlockCreateRequest, WeeklyTemplateSlot
+from app.schemas.planning import (
+    BlockCreateRequest,
+    BlockUpdateRequest,
+    PlannedSessionUpdateRequest,
+    WeeklyTemplateSlot,
+)
 from app.services import macrocycle_service
 
 _DEFAULT_TEMPLATES: dict[BlockGoal, list[WeeklyTemplateSlot]] = {
@@ -262,6 +267,112 @@ async def count_block_skips(
         )
     )
     return int(result.scalar_one() or 0)
+
+
+async def update_block(
+    db: AsyncSession,
+    user_id: int,
+    block_id: int,
+    payload: BlockUpdateRequest,
+) -> MesocycleBlock | None:
+    """Partial update of one owned block. Returns ``None`` when the block does not
+    exist or is not owned by ``user_id`` (router → 404, house idiom).
+
+    ``is not None`` per-field semantics, preserved exactly from the pre-refactor
+    router: an explicit JSON ``null`` and an omitted field are indistinguishable —
+    both leave the stored value untouched. This is deliberately NOT
+    ``payload.model_dump(exclude_unset=True)`` (the idiom ``update_macrocycle``
+    uses), which would apply an explicit null and silently change behavior.
+    """
+    result = await db.execute(
+        select(MesocycleBlock).where(
+            and_(
+                MesocycleBlock.id == block_id,
+                MesocycleBlock.user_id == user_id,
+            )
+        )
+    )
+    block = result.scalars().first()
+    if not block:
+        return None
+    if payload.status is not None:
+        block.status = payload.status
+    if payload.rationale is not None:
+        block.rationale = payload.rationale
+    if payload.modality_mix is not None:
+        block.modality_mix = payload.modality_mix
+    if payload.deload_volume_factor is not None:
+        block.deload_volume_factor = payload.deload_volume_factor
+    await db.commit()
+    await db.refresh(block)
+    return block
+
+
+async def list_blocks(db: AsyncSession, user_id: int) -> list[MesocycleBlock]:
+    """All of a user's blocks, newest first. No id tiebreaker — preserved exactly
+    from the pre-refactor router; do not import ``list_sessions``' tiebreak here."""
+    result = await db.execute(
+        select(MesocycleBlock)
+        .where(MesocycleBlock.user_id == user_id)
+        .order_by(MesocycleBlock.created_at.desc())
+    )
+    return list(result.scalars().all())
+
+
+async def list_sessions(
+    db: AsyncSession,
+    user_id: int,
+    start_date: date | None = None,
+    end_date: date | None = None,
+) -> list[PlannedSession]:
+    """A user's planned sessions, optionally date-bounded. ``scheduled_date asc, id
+    asc`` — preserved exactly from the pre-refactor router."""
+    stmt = select(PlannedSession).where(PlannedSession.user_id == user_id)
+    if start_date:
+        stmt = stmt.where(PlannedSession.scheduled_date >= start_date)
+    if end_date:
+        stmt = stmt.where(PlannedSession.scheduled_date <= end_date)
+    stmt = stmt.order_by(PlannedSession.scheduled_date.asc(), PlannedSession.id.asc())
+    result = await db.execute(stmt)
+    return list(result.scalars().all())
+
+
+async def update_session(
+    db: AsyncSession,
+    user_id: int,
+    session_id: int,
+    payload: PlannedSessionUpdateRequest,
+) -> PlannedSession | None:
+    """Partial update of one owned planned session. Returns ``None`` when the
+    session does not exist or is not owned by ``user_id`` (router → 404)."""
+    result = await db.execute(
+        select(PlannedSession).where(
+            and_(
+                PlannedSession.id == session_id,
+                PlannedSession.user_id == user_id,
+            )
+        )
+    )
+    session = result.scalars().first()
+    if not session:
+        return None
+
+    # A genuine date move preserves the original plan date (first move only). It does
+    # NOT change lifecycle status: the auto-transition to RESCHEDULED used to make the
+    # session permanently undiscoverable, because both resolvers filter on PENDING
+    # (planning_service.get_today_session, state_service._match_planned_session) and
+    # nothing ever writes a session back to PENDING. See ADR-0069.
+    if payload.scheduled_date is not None and payload.scheduled_date != session.scheduled_date:
+        if session.original_scheduled_date is None:
+            session.original_scheduled_date = session.scheduled_date
+        session.scheduled_date = payload.scheduled_date
+
+    if payload.status is not None:
+        session.status = payload.status
+
+    await db.commit()
+    await db.refresh(session)
+    return session
 
 
 async def get_today_session(
