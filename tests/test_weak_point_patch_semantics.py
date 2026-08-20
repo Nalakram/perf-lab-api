@@ -1,8 +1,9 @@
 """Characterization tests for PATCH /v1/weak-points/{id} partial-update semantics.
 
 These pin the three behaviors the route's partial-update contract depends on but
-which `test_weak_point_routes.py` does not exercise — it covers status codes, not
-field semantics:
+which `test_weak_point_routes.py` does not exercise. That file does assert one
+field value (a `note` round-trip), but nothing there discriminates absent from
+explicit-null, pins the tz handling, or proves persistence:
 
   1. A field absent from the request body is left untouched.
   2. An explicit JSON ``null`` is discriminated from an absent field, and the two
@@ -246,3 +247,77 @@ async def test_patch_persists_and_is_visible_to_an_independent_session(async_db)
             assert persisted.resolved_at == datetime(2026, 8, 19, 8, 15, 0)
     finally:
         await engine.dispose()
+
+
+# ---------------------------------------------------------------------------
+# Ownership — missing and not-owned must stay indistinguishable
+# ---------------------------------------------------------------------------
+
+async def test_patching_another_users_weak_point_is_indistinguishable_from_missing(
+    async_db,
+):
+    """A row owned by someone else 404s with the same body as a nonexistent id.
+
+    The ownership predicate lives inside the fetch (``get_for_user`` filters on
+    ``user_id``), so missing and not-owned collapse to one outcome deliberately:
+    distinguishing them — e.g. by fetching first and raising 403 on an owner
+    mismatch — would disclose that another user's row exists. That is the security
+    property the service module docstring claims, so it is asserted here rather
+    than trusted, and it guards the module the logic just moved into.
+    """
+    owner = await _mk_user(async_db, email="wp-sem-owner@test.com")
+    intruder = await _mk_user(async_db, email="wp-sem-intruder@test.com")
+    victim_row = await _mk_weak_point(async_db, owner.id, note="not yours")
+
+    _override(async_db, intruder)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            foreign = await client.patch(
+                f"/v1/weak-points/{victim_row.id}", json={"note": "pwned"}
+            )
+            missing = await client.patch("/v1/weak-points/99999", json={"note": "pwned"})
+
+        assert foreign.status_code == 404, foreign.text
+        assert missing.status_code == 404, missing.text
+        # Identical bodies: the response must not leak that the row exists.
+        assert foreign.json() == missing.json()
+        assert foreign.json()["detail"] == "Weak point not found"
+    finally:
+        app.dependency_overrides.clear()
+
+    # And the row must be untouched.
+    await async_db.refresh(victim_row)
+    assert victim_row.note == "not yours"
+
+
+# ---------------------------------------------------------------------------
+# list active_only — the service default is not reachable from HTTP
+# ---------------------------------------------------------------------------
+
+async def test_list_active_only_false_includes_resolved_rows(async_db):
+    """``active_only=false`` returns resolved rows; the default excludes them.
+
+    The router always passes ``active_only`` explicitly, so the service's own
+    default is unreachable over HTTP and nothing else pins it. Both directions are
+    asserted here so that flipping either default is a test failure rather than a
+    silent change in what a caller receives.
+    """
+    user = await _mk_user(async_db, email="wp-sem-activeonly@test.com")
+    await _mk_weak_point(async_db, user.id, tag="grip")
+    await _mk_weak_point(
+        async_db, user.id, tag="core", resolved_at=datetime(2026, 8, 10, 7, 0, 0)
+    )
+
+    _override(async_db, user)
+    try:
+        async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+            default = await client.get("/v1/weak-points/")
+            including = await client.get("/v1/weak-points/?active_only=false")
+
+        assert default.status_code == 200, default.text
+        assert [r["tag"] for r in default.json()] == ["grip"]
+
+        assert including.status_code == 200, including.text
+        assert sorted(r["tag"] for r in including.json()) == ["core", "grip"]
+    finally:
+        app.dependency_overrides.clear()
