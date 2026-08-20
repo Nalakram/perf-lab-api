@@ -9,41 +9,16 @@ Weak points are never hard-deleted: resolving one is a PATCH that sets
 `resolved_at` (see docs/Data_Model.md, "Weak-point resolution"). Hard
 deletion would also destroy the `source_session_id` benchmark provenance.
 """
-from datetime import datetime
-
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.models.user import User
 from app.repositories.weak_point_repository import WeakPointRepository
+from app.schemas.weak_point import WeakPointOut, WeakPointPatch
 
 router = APIRouter(prefix="/weak-points", tags=["Weak Points"])
-
-
-# ---------------------------------------------------------------------------
-# Inline Pydantic schemas
-# ---------------------------------------------------------------------------
-
-class WeakPointOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    tag: str
-    source: str          # WeakPointSource value as string
-    confidence: float
-    note: str | None
-    detected_at: datetime
-    resolved_at: datetime | None
-    is_active: bool
-
-
-class WeakPointPatch(BaseModel):
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    note: str | None = None
-    resolved_at: datetime | None = None   # pass datetime to resolve; pass null to re-open
 
 
 # ---------------------------------------------------------------------------
