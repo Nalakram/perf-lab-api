@@ -8,42 +8,20 @@ through benchmark observations.
 Weak points are never hard-deleted: resolving one is a PATCH that sets
 `resolved_at` (see docs/Data_Model.md, "Weak-point resolution"). Hard
 deletion would also destroy the `source_session_id` benchmark provenance.
-"""
-from datetime import datetime
 
+Data access and the transaction boundary live in
+`app/services/weak_point_service.py`; this module owns HTTP concerns only.
+"""
 from fastapi import APIRouter, Depends, HTTPException
-from pydantic import BaseModel, ConfigDict, Field
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.auth import get_current_user
 from app.core.db import get_db
 from app.models.user import User
-from app.repositories.weak_point_repository import WeakPointRepository
+from app.schemas.weak_point import WeakPointOut, WeakPointPatch
+from app.services import weak_point_service
 
 router = APIRouter(prefix="/weak-points", tags=["Weak Points"])
-
-
-# ---------------------------------------------------------------------------
-# Inline Pydantic schemas
-# ---------------------------------------------------------------------------
-
-class WeakPointOut(BaseModel):
-    model_config = ConfigDict(from_attributes=True)
-
-    id: int
-    tag: str
-    source: str          # WeakPointSource value as string
-    confidence: float
-    note: str | None
-    detected_at: datetime
-    resolved_at: datetime | None
-    is_active: bool
-
-
-class WeakPointPatch(BaseModel):
-    confidence: float | None = Field(default=None, ge=0.0, le=1.0)
-    note: str | None = None
-    resolved_at: datetime | None = None   # pass datetime to resolve; pass null to re-open
 
 
 # ---------------------------------------------------------------------------
@@ -61,8 +39,8 @@ async def list_weak_points(
     By default only active (unresolved) rows are returned.
     Pass active_only=false to include resolved rows.
     """
-    rows = await WeakPointRepository(db).list_for_user(
-        current_user.id, active_only=active_only
+    rows = await weak_point_service.list_weak_points(
+        db, current_user.id, active_only=active_only
     )
     return [WeakPointOut.model_validate(row) for row in rows]
 
@@ -79,22 +57,9 @@ async def patch_weak_point(
     Only fields explicitly present in the request body are applied.
     Sending resolved_at=null re-opens a resolved weak point.
     """
-    wp = await WeakPointRepository(db).get_for_user(weak_point_id, current_user.id)
+    wp = await weak_point_service.patch_weak_point(
+        db, current_user.id, weak_point_id, patch
+    )
     if wp is None:
         raise HTTPException(status_code=404, detail="Weak point not found")
-
-    # Only apply fields that were explicitly set in the request body.
-    # confidence maps to a NOT NULL column, so guard against an explicit null.
-    if "confidence" in patch.model_fields_set and patch.confidence is not None:
-        wp.confidence = patch.confidence
-    if "note" in patch.model_fields_set:
-        wp.note = patch.note
-    if "resolved_at" in patch.model_fields_set:
-        # Columns are naive-UTC; normalize an incoming tz-aware value so asyncpg
-        # doesn't reject the naive-vs-aware bind on a TIMESTAMP column.
-        rv = patch.resolved_at
-        wp.resolved_at = rv.replace(tzinfo=None) if rv is not None and rv.tzinfo else rv
-
-    await db.commit()
-    await db.refresh(wp)
     return WeakPointOut.model_validate(wp)
