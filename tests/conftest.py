@@ -164,22 +164,59 @@ def _run_upgrade(connection: Connection) -> None:
     command.upgrade(cfg, "head")
 
 
-# Empties every table the migrations created, in one round trip, without touching
-# DDL. alembic_version is deliberately preserved — truncating it would strand the
-# schema at an unknown revision for the rest of the session.
-_TRUNCATE_ALL = """
-DO $$
-DECLARE tables text;
-BEGIN
-    SELECT string_agg(format('%I.%I', schemaname, tablename), ', ')
-      INTO tables
-      FROM pg_tables
-     WHERE schemaname = 'public' AND tablename <> 'alembic_version';
-    IF tables IS NOT NULL THEN
-        EXECUTE 'TRUNCATE TABLE ' || tables || ' RESTART IDENTITY CASCADE';
-    END IF;
-END $$;
-"""
+# Empties every table the migrations created, without touching DDL. alembic_version is
+# deliberately preserved — truncating it would strand the schema at an unknown revision
+# for the rest of the session.
+#
+# Only the tables that actually hold rows are truncated, in one statement. Two reasons,
+# both measured on this schema (33 tables, 122 indexes, 33 sequences):
+#
+# 1. Locks. TRUNCATE takes ACCESS EXCLUSIVE on each named table *and* its indexes and
+#    toast relations — ~250 lock entries for the full set — held until the transaction
+#    ends. Those come from one server-wide lock table sized
+#    max_locks_per_transaction * max_connections (64 * 100 = 6400 by default), so under
+#    ``-n auto`` on a many-core box the workers collectively overflow it and Postgres
+#    raises "out of shared memory". A typical test dirties a handful of tables, so naming
+#    only those keeps a worker's peak in the tens.
+# 2. Speed. TRUNCATE's cost is per *statement*, not per table — it recreates relation
+#    files. Measured here: ~665 ms whether it names 33 tables or one. So the win is
+#    skipping the statement entirely when nothing is dirty, not naming fewer tables.
+#    (Chunking across several statements is therefore the wrong shape: it multiplies the
+#    expensive part. An earlier attempt at that made the suite 3.5x slower.)
+#
+# Semantics are unchanged from truncating everything: an untouched table is already empty
+# and its sequence already at 1, because whatever last emptied it did so with RESTART
+# IDENTITY. CASCADE may pull in a table the probe called empty; harmless.
+_TRUNCATE_CHUNK_SIZE = 20
+
+# One round trip (~1.7 ms), no dynamic SQL from Python: query_to_xml runs a LIMIT 1 probe
+# per table server-side, so an empty table costs an empty scan rather than a full count.
+_NONEMPTY_PUBLIC_TABLES = sa.text(
+    """
+    SELECT format('%I.%I', n.nspname, c.relname) AS qname
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+     WHERE n.nspname = 'public'
+       AND c.relkind = 'r'
+       AND c.relname <> 'alembic_version'
+       AND (xpath('/row/c/text()',
+                  query_to_xml(
+                      format('SELECT count(*) AS c FROM (SELECT 1 FROM %I.%I LIMIT 1) s',
+                             n.nspname, c.relname),
+                      false, true, '')))[1]::text::int > 0
+     ORDER BY 1
+    """
+)
+
+
+async def _truncate_all(engine) -> None:
+    """Empty every table that holds rows, resetting their identities."""
+    async with engine.connect() as conn:
+        names = [row[0] for row in (await conn.execute(_NONEMPTY_PUBLIC_TABLES)).fetchall()]
+        for start in range(0, len(names), _TRUNCATE_CHUNK_SIZE):
+            chunk = ", ".join(names[start : start + _TRUNCATE_CHUNK_SIZE])
+            await conn.execute(sa.text(f"TRUNCATE TABLE {chunk} RESTART IDENTITY CASCADE"))
+            await conn.commit()
 
 
 async def _ensure_database_exists() -> None:
@@ -209,19 +246,52 @@ async def _ensure_database_exists() -> None:
         await admin.dispose()
 
 
+# Any stable 64-bit int works; every worker must use the same one.
+_SCHEMA_BUILD_LOCK_KEY = 0x7E571AB1
+
+
 async def _build_schema() -> None:
-    """Drop+recreate ``public`` and migrate it to head. Runs once per session."""
+    """Drop+recreate ``public`` and migrate it to head. Runs once per session.
+
+    Serialized across xdist workers by a Postgres advisory lock. ``DROP SCHEMA CASCADE``
+    and the Alembic upgrade each hold ACCESS EXCLUSIVE on every object in the schema for
+    the length of their transaction, and *every* worker runs this at startup at the same
+    moment. The lock table is server-wide (see ``_TRUNCATE_CHUNK_SIZE``), so N workers
+    multiply the demand and overflow it — which surfaces as "out of shared memory" from
+    ``DROP SCHEMA``, failing the session-scoped fixture and erroring every test in that
+    worker. The gate makes the peak one worker's worth instead of N.
+
+    The lock is held on a separate AUTOCOMMIT connection to the ``postgres`` database and
+    is released when that session closes, so ``dispose()`` in the ``finally`` frees it
+    even if the build raises.
+    """
     await _ensure_database_exists()
-    engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
+    gate_url = (
+        make_url(TEST_DATABASE_URL)
+        .set(database="postgres")
+        .render_as_string(hide_password=False)
+    )
+    gate_engine = create_async_engine(
+        gate_url, isolation_level="AUTOCOMMIT", poolclass=NullPool
+    )
     try:
-        async with engine.begin() as conn:
-            await conn.execute(sa.text("DROP SCHEMA IF EXISTS public CASCADE"))
-            await conn.execute(sa.text("CREATE SCHEMA public"))
-            await conn.execute(sa.text("GRANT ALL ON SCHEMA public TO PUBLIC"))
-        async with engine.connect() as conn:
-            await conn.run_sync(_run_upgrade)
+        async with gate_engine.connect() as gate:
+            await gate.execute(
+                sa.text("SELECT pg_advisory_lock(:key)"),
+                {"key": _SCHEMA_BUILD_LOCK_KEY},
+            )
+            engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
+            try:
+                async with engine.begin() as conn:
+                    await conn.execute(sa.text("DROP SCHEMA IF EXISTS public CASCADE"))
+                    await conn.execute(sa.text("CREATE SCHEMA public"))
+                    await conn.execute(sa.text("GRANT ALL ON SCHEMA public TO PUBLIC"))
+                async with engine.connect() as conn:
+                    await conn.run_sync(_run_upgrade)
+            finally:
+                await engine.dispose()
     finally:
-        await engine.dispose()
+        await gate_engine.dispose()
 
 
 @pytest.fixture(scope="session")
@@ -257,8 +327,7 @@ async def async_db(_migrated_schema: None) -> AsyncSession:
     only guarantees the *data* is empty. Migration/loop errors propagate.
     """
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
-    async with engine.begin() as conn:
-        await conn.execute(sa.text(_TRUNCATE_ALL))
+    await _truncate_all(engine)
 
     factory = sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
     async with factory() as session:
