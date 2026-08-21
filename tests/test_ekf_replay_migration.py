@@ -12,7 +12,7 @@ import pytest
 import pytest_asyncio
 import sqlalchemy as sa
 from alembic.config import Config
-from conftest import _TRUNCATE_ALL, TEST_DATABASE_URL
+from conftest import TEST_DATABASE_URL, _truncate_all
 from sqlalchemy import inspect, select
 from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -50,8 +50,7 @@ def _index_names(sync_conn: Connection) -> set[str]:
 @pytest_asyncio.fixture(loop_scope="function")
 async def engine(_migrated_schema: None):
     eng = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
-    async with eng.begin() as conn:
-        await conn.execute(sa.text(_TRUNCATE_ALL))
+    await _truncate_all(eng)
     yield eng
     # Always leave the shared schema at head, even if an assertion failed mid-round-trip.
     async with eng.connect() as conn:

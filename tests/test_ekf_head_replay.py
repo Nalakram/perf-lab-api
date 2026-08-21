@@ -16,7 +16,7 @@ from datetime import UTC, date, datetime
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from conftest import _TRUNCATE_ALL, TEST_DATABASE_URL
+from conftest import TEST_DATABASE_URL, _truncate_all
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -41,8 +41,7 @@ pytestmark = pytest.mark.asyncio
 @pytest_asyncio.fixture(loop_scope="function")
 async def factory(_migrated_schema: None):
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
-    async with engine.begin() as conn:
-        await conn.execute(sa.text(_TRUNCATE_ALL))
+    await _truncate_all(engine)
     yield sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
     await engine.dispose()
 

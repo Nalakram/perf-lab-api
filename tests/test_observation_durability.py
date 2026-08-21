@@ -41,7 +41,7 @@ from datetime import UTC, datetime
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from conftest import _TRUNCATE_ALL, TEST_DATABASE_URL
+from conftest import TEST_DATABASE_URL, _truncate_all
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
 from sqlalchemy.orm import sessionmaker
@@ -66,8 +66,7 @@ async def session_factory(_migrated_schema: None):
     closing sessions explicitly here reproduces the production lifecycle instead.
     """
     engine = create_async_engine(TEST_DATABASE_URL, echo=False, poolclass=NullPool)
-    async with engine.begin() as conn:
-        await conn.execute(sa.text(_TRUNCATE_ALL))
+    await _truncate_all(engine)
     yield sessionmaker(engine, class_=AsyncSession, expire_on_commit=False, autoflush=False)
     await engine.dispose()
 
