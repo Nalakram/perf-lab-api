@@ -1,6 +1,7 @@
 """Record deferred upward_lower_bound floor candidates as shadow evidence (ADR-0058).
 
-Capture-only, mirroring the EKF / dose-routing shadow services. When
+Capture-only, isolated exactly like the EKF / dose-routing shadow services: the row is
+written after the observation commits, in its own best-effort transaction. When
 ``create_observation`` resolves an ``upward_lower_bound`` capacity_effect, the
 authority is real but the live floor-ratchet is not promoted — this records the
 resolved authority and the *would-be* applied transition **separately** so a future,
@@ -10,7 +11,6 @@ production state (``decision_impact = "none_shadow_only"``).
 
 from __future__ import annotations
 
-import logging
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -19,8 +19,7 @@ from app.domain.vectors import CapacityState
 from app.logic import observation_authority as oa
 from app.models.capacity_floor_shadow import CapacityFloorShadowLog
 from app.schemas.state import UnifiedStateVector
-
-logger = logging.getLogger(__name__)
+from app.services.telemetry_common import best_effort_write
 
 
 def floor_candidate_payload(
@@ -61,13 +60,21 @@ async def record_floor_candidate(
     prior: UnifiedStateVector,
     floored: UnifiedStateVector,
 ) -> None:
-    """Add a shadow candidate row for a deferred floor-ratchet (best-effort).
+    """Write a shadow candidate row for a deferred floor-ratchet (best-effort).
 
-    The row is added to the session but NOT committed here — it commits atomically
-    with the observation it belongs to. Best-effort: a failure logs and is swallowed
-    so shadow capture can never break the observation write.
+    Call this **after** the observation has been committed. The row is written in its
+    own transaction via :func:`telemetry_common.best_effort_write`, so a failure to
+    persist shadow evidence can never abort the benchmark observation it describes.
+
+    That isolation is load-bearing, not stylistic. ``db.add`` only stages a row in
+    memory and performs no I/O, so a guard wrapped around it catches nothing: the INSERT
+    — and any constraint violation it raises — executes at commit time, inside whichever
+    transaction flushes it. While this rode the live transaction, a bad shadow row failed
+    the primary write. The cost of isolating it is that the candidate is no longer atomic
+    with its observation; losing one piece of evidence is the intended best-effort
+    trade, and ``benchmark_observation_id`` is nullable with ``ondelete=CASCADE``.
     """
-    try:
+    async with best_effort_write(db, f"capacity floor shadow candidate (user {user_id})"):
         payload = floor_candidate_payload(prior, floored)
         row = CapacityFloorShadowLog(
             user_id=user_id,
@@ -86,8 +93,3 @@ async def record_floor_candidate(
             decision_impact="none_shadow_only",
         )
         db.add(row)
-    except Exception:
-        logger.warning(
-            "capacity floor shadow capture failed for user %s (obs %s)",
-            user_id, getattr(observation, "id", None), exc_info=True,
-        )

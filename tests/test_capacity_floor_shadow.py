@@ -6,7 +6,9 @@ floor, projected uplift, application-policy version, not-applied reason) while c
 capacity stays untouched — the deployed ADR-0055 invariant remains active.
 """
 
+import logging
 from datetime import UTC, datetime
+from typing import Any
 
 import pytest
 from sqlalchemy import func, select
@@ -14,6 +16,7 @@ from sqlalchemy import func, select
 from app.logic import observation_authority as oa
 from app.models.athlete_state import AthleteState
 from app.models.benchmark_definition import BenchmarkDefinition
+from app.models.benchmark_observation import BenchmarkObservation
 from app.models.capacity_floor_shadow import CapacityFloorShadowLog
 from app.models.exercise import Exercise
 from app.models.observation_mapping import ObservationMapping
@@ -128,3 +131,70 @@ async def test_workout_extraction_records_floor_shadow_no_state_mutation(async_d
     assert row.not_applied_reason == oa.FLOOR_NOT_APPLIED_DEFERRED
     assert row.projected_uplift_total > 0.0
     assert "max_strength" in row.proposed_floor_json
+
+
+# ── isolation: a shadow-write failure must not abort the observation ───────────
+
+def _oversized_row(**kwargs: Any) -> CapacityFloorShadowLog:
+    """Build a shadow row that only fails once the INSERT actually executes.
+
+    ``benchmark_code`` is ``String(100)`` (app/models/capacity_floor_shadow.py:41), so a
+    200-character value is staged by ``db.add`` without complaint and raises at
+    flush/commit time. That is precisely the failure class a guard wrapped around
+    ``db.add`` cannot catch — ``db.add`` stages in memory and performs no I/O, so the
+    error surfaces later, in whichever transaction happens to flush it.
+    """
+    kwargs["benchmark_code"] = "x" * 200
+    return CapacityFloorShadowLog(**kwargs)
+
+
+async def _observation_count(db, user_id: int) -> int:
+    r = await db.execute(
+        select(func.count())
+        .select_from(BenchmarkObservation)
+        .where(BenchmarkObservation.user_id == user_id)
+    )
+    return int(r.scalar_one())
+
+
+async def test_shadow_write_failure_does_not_abort_the_observation(
+    async_db, monkeypatch, caplog
+) -> None:
+    """ADR-0058 capture is best-effort: its failure must never fail the primary write.
+
+    Red before the isolation fix: the oversized row is staged into the *live* transaction,
+    so the observation's own ``db.commit()`` raises and the whole POST fails.
+    """
+    user = await _user(async_db, "cf2@test.com")
+    await _seed(async_db)
+    await initialize_athlete_state(async_db, user.id)
+    # Snapshot the id: the best-effort rollback expires every ORM object on the shared
+    # session, so reading `user.id` afterwards would lazy-load outside a greenlet.
+    user_id = user.id
+
+    monkeypatch.setattr(
+        capacity_floor_shadow_service, "CapacityFloorShadowLog", _oversized_row
+    )
+
+    with caplog.at_level(logging.WARNING):
+        result = await benchmark_service.create_observation(
+            async_db,
+            user_id,
+            BenchmarkObservationCreate(
+                benchmark_code="pl_e1rm_squat",
+                raw_value=180.0,
+                source="workout_extraction",
+            ),
+        )
+
+    # 1. The primary benchmark write survived and is durable.
+    assert result.benchmark_code == "pl_e1rm_squat"
+    assert await _observation_count(async_db, user_id) == 1
+
+    # 2. The shadow candidate did not land — it is evidence, never a blocker.
+    assert await _shadow_rows(async_db, user_id) == []
+
+    # 3. The failure is observable rather than silently swallowed.
+    assert any(
+        "capacity floor shadow" in rec.getMessage().lower() for rec in caplog.records
+    ), f"no shadow-failure warning logged; saw {[r.getMessage() for r in caplog.records]}"
