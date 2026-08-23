@@ -119,6 +119,12 @@ const fmtMonth = (iso: string): string => {
 };
 const cell = (v: number | null, suffix = ""): string => (v == null ? "—" : `${v}${suffix}`);
 
+// Wellness rows carry the source that reported them. Only "manual" has a fixed meaning
+// (the athlete typed it); every other value is a provider name, so it is humanised
+// rather than mapped — a new integration must not need an edit here to render.
+const sourceLabel = (s: string | null | undefined): string =>
+  s == null || s.trim() === "" ? "—" : s.trim().toLowerCase() === "manual" ? "You" : s.replace(/_/g, " ");
+
 // VO₂max progression — derived from the athlete's real field-test benchmark
 // observations (the same series the field-test log below shows), newest first.
 // No signed-in athlete sees a fabricated curve: guests and empty histories get
@@ -255,7 +261,15 @@ function RecentWellnessCard() {
             </div>
             {samples.map((w) => (
               <div key={w.id} className="grid grid-cols-[1.1fr_1fr_1fr_1fr_1fr] items-center gap-2 border-b border-white/[0.05] py-[12px] last:border-0">
-                <span className="text-[13px] font-semibold leading-none text-ink">{fmtDay(w.date)}</span>
+                {/* A day can hold several rows — the table is keyed (user, date, source) —
+                    so the date alone renders two different sources as two identical rows.
+                    The source is what tells them apart. */}
+                <span className="flex flex-col gap-[3px]">
+                  <span className="text-[13px] font-semibold leading-none text-ink">{fmtDay(w.date)}</span>
+                  <span className="font-mono text-[10px] font-medium leading-none tracking-[0.06em] text-faint">
+                    {sourceLabel(w.source)}
+                  </span>
+                </span>
                 <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.hrv_ms, " ms")}</span>
                 <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.sleep_hours, " h")}</span>
                 <span className="font-mono text-[13px] font-medium leading-none text-soft">{cell(w.resting_hr)}</span>
