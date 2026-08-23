@@ -21,6 +21,7 @@ Only signals with ``coverage=True`` participate in the wellness-coverage denomin
 """
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass, field
 
 from app.models.wellness import WellnessSample
@@ -84,7 +85,7 @@ def _has_value(source: object, metric: str) -> bool:
     return getattr(source, metric, None) is not None
 
 
-def signal_provided(source: WellnessSample | dict[str, object], signal: str) -> bool:
+def signal_provided(source: WellnessSample | Mapping[str, object], signal: str) -> bool:
     """True if a logical signal is present on a sample (any backing metric, by default)."""
     sig = WELLNESS_SIGNAL_REGISTRY[signal]
     if isinstance(source, dict):
@@ -94,6 +95,6 @@ def signal_provided(source: WellnessSample | dict[str, object], signal: str) -> 
     return any(present) if sig.provided_if_any else all(present)
 
 
-def provided_signals(source: WellnessSample | dict[str, object]) -> set[str]:
+def provided_signals(source: WellnessSample | Mapping[str, object]) -> set[str]:
     """The set of logical coverage-signals present on a sample."""
     return {s for s in coverage_signals() if signal_provided(source, s)}
