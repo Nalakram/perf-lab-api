@@ -1508,6 +1508,62 @@
         "title": "ConnectionStatus",
         "type": "object"
       },
+      "ConservatismSummary": {
+        "description": "Whether the twin's own uncertainty made this session more cautious.\n\nReports the decision either way, including when it declined to act, so \"the plan was not\nsoftened\" is visibly a choice rather than an absence. ``applied`` is the only field that\nsays the prescription actually changed - in ``shadow`` mode the reduction is described\nbut ``effective_rpe_cap`` still equals the baseline.",
+        "properties": {
+          "applied": {
+            "description": "True only if the prescribed cap actually moved.",
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "baseline_rpe_cap": {
+            "description": "The RPE cap the ADR-0029 envelope produced.",
+            "title": "Baseline Rpe Cap",
+            "type": "number"
+          },
+          "basis_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty of the weakest capacity axis, which is what the rule acts on.",
+            "title": "Basis Status"
+          },
+          "effective_rpe_cap": {
+            "description": "The cap actually used to resolve load.",
+            "title": "Effective Rpe Cap",
+            "type": "number"
+          },
+          "mode": {
+            "description": "off | shadow | on - the tri-state flag's value for this session.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the rule did or did not act.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "applied",
+          "baseline_rpe_cap",
+          "effective_rpe_cap",
+          "reason"
+        ],
+        "title": "ConservatismSummary",
+        "type": "object"
+      },
       "DashboardBundleOut": {
         "description": "Latest primary-anchor observations plus derived KPI snapshots.",
         "properties": {
@@ -3467,6 +3523,17 @@
               }
             ],
             "description": "Certainty of the twin state this session was built on. NULL when no state exists."
+          },
+          "conservatism": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConservatismSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether low confidence made this session more cautious. NULL when load was never resolved for this prescription (no lift with a current e1RM)."
           },
           "constraints_applied": {
             "items": {

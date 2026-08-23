@@ -12,6 +12,7 @@ from app.core.errors import CanonicalStateInvalid, normalize_decode_error
 from app.engine import feature_flags
 from app.engine.engine_state_codec import EngineStateDecodeError
 from app.logic import strength_calibration as sc
+from app.logic import uncertainty_conservatism
 from app.logic.constraint_engine.candidate import SessionCandidate
 from app.logic.planning import periodization_envelope
 from app.logic.prescriber import recommend_next_session
@@ -22,7 +23,7 @@ from app.models.exercise import Exercise
 from app.models.mesocycle import BlockStatus, MesocycleBlock, PlannedSession
 from app.models.weak_point import WeakPoint
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
-from app.schemas.prescription import WorkoutPrescription
+from app.schemas.prescription import ConservatismSummary, WorkoutPrescription
 from app.schemas.state import UnifiedStateVector
 from app.schemas.training_goals import TRAINING_GOAL_DEFAULT, TrainingGoal
 from app.schemas.wellness import ReadinessScore
@@ -241,7 +242,31 @@ async def _enrich_exercises_with_load(
         current_axis = float(state.capacity_x.max_strength) if state is not None else None
         rules_by_code = await _standardization_rules_for_codes(db, set(code_by_name.values()))
 
-    rpe_cap = _envelope_rpe_cap(block_context)
+    baseline_rpe_cap = _envelope_rpe_cap(block_context)
+    # Uncertainty may make this session more cautious. Reads the confidence already
+    # attached to `rx.why` by finalize_prescription in phase 3, so the cap is driven by
+    # exactly the certainty the athlete is shown — not a second, separately-derived view.
+    conservatism = uncertainty_conservatism.decide(
+        baseline_rpe_cap=baseline_rpe_cap,
+        weakest_status=(
+            rx.why.confidence.weakest_capacity_status
+            if rx.why is not None and rx.why.confidence is not None
+            else None
+        ),
+        mode=getattr(
+            feature_flags, "UNCERTAINTY_CONSERVATISM", uncertainty_conservatism.MODE_OFF
+        ),
+    )
+    if rx.why is not None:
+        rx.why.conservatism = ConservatismSummary(
+            mode=conservatism.mode,
+            applied=conservatism.applied,
+            basis_status=conservatism.basis_status,
+            baseline_rpe_cap=conservatism.baseline_rpe_cap,
+            effective_rpe_cap=conservatism.effective_rpe_cap,
+            reason=conservatism.reason,
+        )
+    rpe_cap = conservatism.effective_rpe_cap
     for ex in rx.exercises:
         code = code_by_name.get(ex.name)
         e1rm = e1rm_by_code.get(code) if code else None

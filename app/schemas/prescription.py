@@ -109,6 +109,26 @@ class PlanRevisionTrigger(BaseModel):
     threshold: float = Field(description="The value it would have to cross.")
 
 
+class ConservatismSummary(BaseModel):
+    """Whether the twin's own uncertainty made this session more cautious.
+
+    Reports the decision either way, including when it declined to act, so "the plan was not
+    softened" is visibly a choice rather than an absence. ``applied`` is the only field that
+    says the prescription actually changed - in ``shadow`` mode the reduction is described
+    but ``effective_rpe_cap`` still equals the baseline.
+    """
+
+    mode: str = Field(description="off | shadow | on - the tri-state flag's value for this session.")
+    applied: bool = Field(description="True only if the prescribed cap actually moved.")
+    basis_status: ConfidenceStatus | None = Field(
+        default=None,
+        description="Certainty of the weakest capacity axis, which is what the rule acts on.",
+    )
+    baseline_rpe_cap: float = Field(description="The RPE cap the ADR-0029 envelope produced.")
+    effective_rpe_cap: float = Field(description="The cap actually used to resolve load.")
+    reason: str = Field(description="Why the rule did or did not act.")
+
+
 class PrescriptionExplanation(BaseModel):
     """Why this session — state drivers, constraints, sources."""
 
@@ -133,6 +153,13 @@ class PrescriptionExplanation(BaseModel):
             "What would change this plan: the drivers currently applying that would switch "
             "off, and the nearest ones that would switch on. Derived from the same "
             "thresholds the prescriber used, so they cannot disagree."
+        ),
+    )
+    conservatism: "ConservatismSummary | None" = Field(
+        default=None,
+        description=(
+            "Whether low confidence made this session more cautious. NULL when load was "
+            "never resolved for this prescription (no lift with a current e1RM)."
         ),
     )
     measurement_recommendations: list[MeasurementRecommendation] = Field(
