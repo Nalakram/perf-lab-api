@@ -19,6 +19,7 @@ from app.logic.prescription_finalize import (
     NO_DRIVERS_LABEL,
     UNCERTAINTY_NOT_MODELLED,
     _derive_confidence,
+    _derive_measurement_recommendations,
     _derive_state_drivers,
     _derive_state_evidence,
 )
@@ -153,3 +154,59 @@ def test_weakest_axis_is_the_least_certain_one() -> None:
     assert c.weakest_capacity_axis == "max_strength"
     assert c.weakest_capacity_status == "insufficient"
     assert c.capacity_axes["aerobic"] == "established"
+
+
+# ── measurement recommendations ───────────────────────────────────────────────
+
+
+def _conf(**over: float) -> CapacityConfidence:
+    """All axes established except the ones named."""
+    c = CapacityConfidence()
+    for axis in CapacityConfidence.KEYS:
+        setattr(c, axis, 0.05)
+    for axis, var in over.items():
+        setattr(c, axis, var)
+    return c
+
+
+def test_established_axes_are_never_suggested_for_measurement() -> None:
+    """Nothing is gained by re-measuring an axis the twin already knows."""
+    recs = _derive_measurement_recommendations(_state(capacity_confidence=_conf()), "powerlifting")
+
+    assert recs == []
+
+
+def test_goal_relevant_uncertainty_outranks_more_severe_irrelevant_uncertainty() -> None:
+    """This is the whole point of ranking: relevance beats raw severity.
+
+    mobility is *more* uncertain than hypertrophy, but powerlifting does not train it, so
+    the axis the athlete actually loads is the one worth measuring first.
+    """
+    state = _state(
+        capacity_confidence=_conf(max_strength=1.4, hypertrophy=0.9, mobility=1.4)
+    )
+
+    recs = _derive_measurement_recommendations(state, "powerlifting")
+    axes = [r.axis for r in recs]
+
+    assert axes[0] == "max_strength"
+    assert axes.index("hypertrophy") < axes.index("mobility")
+    assert [r.material_to_goal for r in recs][:2] == [True, True]
+
+
+def test_every_recommendation_explains_why() -> None:
+    state = _state(capacity_confidence=_conf(max_strength=1.4, hypertrophy=0.9))
+
+    for r in _derive_measurement_recommendations(state, "powerlifting"):
+        assert r.reason, f"{r.axis} recommended with no reason"
+        assert r.current_status != "established"
+
+
+def test_an_unrecognised_goal_still_recommends_by_severity() -> None:
+    """No goal domain means no relevance signal — rank on certainty alone, never crash."""
+    state = _state(capacity_confidence=_conf(max_strength=1.4, hypertrophy=0.9))
+
+    recs = _derive_measurement_recommendations(state, "not-a-real-goal")
+
+    assert [r.axis for r in recs] == ["max_strength", "hypertrophy"]
+    assert all(r.material_to_goal is False for r in recs)

@@ -17,12 +17,14 @@ from app.logic.constraint_engine import (
     encode_session_candidate,
     simple_session_scorer,
 )
+from app.logic.goal_seed_emphasis import GOAL_AXIS_FLOOR, domain_for_goal
 from app.logic.registries import (
     get_fallback_template,
     get_template_for_goal,
     primitive_names,
 )
 from app.schemas.prescription import (
+    MeasurementRecommendation,
     PrescriptionConfidence,
     PrescriptionExplanation,
     StateEvidence,
@@ -162,6 +164,49 @@ def _derive_confidence(state: UnifiedStateVector) -> PrescriptionConfidence:
     )
 
 
+#: How many measurement suggestions are worth surfacing on one session.
+MAX_MEASUREMENT_RECOMMENDATIONS = 4
+
+#: Why each band is worth acting on, phrased for the athlete rather than the estimator.
+_MEASUREMENT_REASON: dict[str, str] = {
+    "insufficient": (
+        "no observation has constrained this axis yet - its value is an unrefined prior, "
+        "so anything this session infers from it is a guess"
+    ),
+    "provisional": (
+        "only weakly constrained - one benchmark would materially sharpen it"
+    ),
+}
+
+
+def _derive_measurement_recommendations(
+    state: UnifiedStateVector, goal: TrainingGoal
+) -> list[MeasurementRecommendation]:
+    """Name the axes whose uncertainty most limits this plan, worst and most-relevant first.
+
+    Uses the goal's own trained axes (``GOAL_AXIS_FLOOR``) to rank: an uncertain axis the
+    athlete's domain actually trains outranks an equally uncertain one they never touch.
+    An established axis is never suggested - there is nothing to gain by re-measuring it.
+    """
+    bands = _capacity_bands(state)
+    domain = domain_for_goal(str(goal))
+    goal_axes: set[str] = set(GOAL_AXIS_FLOOR.get(domain, {})) if domain else set()
+
+    out = [
+        MeasurementRecommendation(
+            axis=axis,
+            current_status=status,
+            material_to_goal=axis in goal_axes,
+            reason=_MEASUREMENT_REASON.get(status, ""),
+        )
+        for axis, status in bands.items()
+        if status != "established"
+    ]
+    # Goal-relevant first, then least-certain first, then stable by name.
+    out.sort(key=lambda r: (not r.material_to_goal, _STATUS_RANK.get(r.current_status, 0), r.axis))
+    return out[:MAX_MEASUREMENT_RECOMMENDATIONS]
+
+
 def finalize_prescription(
     rx: WorkoutPrescription,
     state: UnifiedStateVector | None,
@@ -252,6 +297,7 @@ def finalize_prescription(
         state_drivers=[e.label for e in evidence] or [NO_DRIVERS_LABEL],
         state_evidence=evidence,
         confidence=_derive_confidence(state),
+        measurement_recommendations=_derive_measurement_recommendations(state, goal),
         goal_alignment=str(goal),
         constraints_applied=applied,
         source_alignment=sources[:14],

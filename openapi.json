@@ -2498,6 +2498,44 @@
         "title": "MacrocycleUpdate",
         "type": "object"
       },
+      "MeasurementRecommendation": {
+        "description": "What to measure next to make the twin less unsure about THIS goal.\n\nThe goal's rule is that a missing optional measurement should reduce certainty rather\nthan make the app unusable \u2014 so the honest response to low confidence is to say what\nwould raise it. Ranked so an axis the athlete's own goal actually trains outranks an\nequally-uncertain axis they never touch.",
+        "properties": {
+          "axis": {
+            "description": "Capacity axis whose uncertainty a measurement would reduce.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "current_status": {
+            "description": "The axis's certainty band right now.",
+            "enum": [
+              "established",
+              "provisional",
+              "insufficient"
+            ],
+            "title": "Current Status",
+            "type": "string"
+          },
+          "material_to_goal": {
+            "description": "Whether this axis is one the athlete's current goal domain actually trains.",
+            "title": "Material To Goal",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why this axis is worth measuring.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "axis",
+          "current_status",
+          "material_to_goal",
+          "reason"
+        ],
+        "title": "MeasurementRecommendation",
+        "type": "object"
+      },
       "MetricsRequest": {
         "properties": {
           "age": {
@@ -3396,6 +3434,14 @@
             "default": "",
             "title": "Goal Alignment",
             "type": "string"
+          },
+          "measurement_recommendations": {
+            "description": "What to measure to sharpen this plan, worst-first with goal-relevant axes prioritised. Empty when every capacity axis is already established.",
+            "items": {
+              "$ref": "#/components/schemas/MeasurementRecommendation"
+            },
+            "title": "Measurement Recommendations",
+            "type": "array"
           },
           "prescription_branch": {
             "anyOf": [

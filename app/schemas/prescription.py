@@ -73,6 +73,23 @@ class PrescriptionConfidence(BaseModel):
     )
 
 
+class MeasurementRecommendation(BaseModel):
+    """What to measure next to make the twin less unsure about THIS goal.
+
+    The goal's rule is that a missing optional measurement should reduce certainty rather
+    than make the app unusable — so the honest response to low confidence is to say what
+    would raise it. Ranked so an axis the athlete's own goal actually trains outranks an
+    equally-uncertain axis they never touch.
+    """
+
+    axis: str = Field(description="Capacity axis whose uncertainty a measurement would reduce.")
+    current_status: ConfidenceStatus = Field(description="The axis's certainty band right now.")
+    material_to_goal: bool = Field(
+        description="Whether this axis is one the athlete's current goal domain actually trains."
+    )
+    reason: str = Field(description="Why this axis is worth measuring.")
+
+
 class PrescriptionExplanation(BaseModel):
     """Why this session — state drivers, constraints, sources."""
 
@@ -90,6 +107,13 @@ class PrescriptionExplanation(BaseModel):
     confidence: "PrescriptionConfidence | None" = Field(
         default=None,
         description="Certainty of the twin state this session was built on. NULL when no state exists.",
+    )
+    measurement_recommendations: list[MeasurementRecommendation] = Field(
+        default_factory=lambda: [],
+        description=(
+            "What to measure to sharpen this plan, worst-first with goal-relevant axes "
+            "prioritised. Empty when every capacity axis is already established."
+        ),
     )
     goal_alignment: str = ""
     constraints_applied: list[str] = Field(default_factory=list)
