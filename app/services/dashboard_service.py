@@ -163,6 +163,13 @@ def _compute_derived_value(
         ctx: dict[str, Any] = {}
         for key in inputs:
             if key == "bodyweight_kg":
+                # Treat an absent bodyweight exactly like every other unresolved input
+                # below. This branch used to `continue` with `None` still in hand, so a
+                # missing profile measurement reached the formula and was substituted
+                # with a population figure — then stored at confidence 1.0, because
+                # nothing had errored. A missing input is a missing KPI, not a guess.
+                if bodyweight_kg is None:
+                    return None, [], f"missing input {key}"
                 ctx[key] = bodyweight_kg
                 continue
             if key in kpi_ctx:

@@ -27,3 +27,17 @@ OFF/ON path with a validation harness before a control flag returns. See docs/ad
 #              ceiling; the chronologically-latest raw observation is no longer direct
 #              durable prescription authority.
 DECLINE_CANDIDATE_PRESCRIPTION_BASIS: str = "off"
+
+# ADR-0029 envelope: let low confidence make a session more cautious. Tri-state — the flag
+# governs whether the twin's own uncertainty is allowed to change what it prescribes, not an
+# incidental clamp:
+#   "off"    → the RPE cap is untouched. Byte-identical to the pre-flag behaviour.
+#   "shadow" → compute and report the reduction the twin would apply, still prescribe the
+#              unadjusted cap. Lets the effect be watched on real athletes before it acts.
+#   "on"     → a low-confidence weakest capacity axis lowers the working RPE cap, and
+#              percentage / kg / load-note all follow from it.
+# Read by app/services/prescription_service.py (_enrich_exercises_with_load).
+# 2026-08-23: moved off -> shadow by owner decision. Shadow computes the reduction and
+# reports it on every prescription without applying it, so prescribed loads are unchanged
+# and the effect can be watched on real athletes before anyone decides on "on".
+UNCERTAINTY_CONSERVATISM: str = "shadow"

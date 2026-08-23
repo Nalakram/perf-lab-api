@@ -12,6 +12,7 @@ from app.core.errors import CanonicalStateInvalid, normalize_decode_error
 from app.engine import feature_flags
 from app.engine.engine_state_codec import EngineStateDecodeError
 from app.logic import strength_calibration as sc
+from app.logic import uncertainty_conservatism
 from app.logic.constraint_engine.candidate import SessionCandidate
 from app.logic.planning import periodization_envelope
 from app.logic.prescriber import recommend_next_session
@@ -22,7 +23,7 @@ from app.models.exercise import Exercise
 from app.models.mesocycle import BlockStatus, MesocycleBlock, PlannedSession
 from app.models.weak_point import WeakPoint
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
-from app.schemas.prescription import WorkoutPrescription
+from app.schemas.prescription import ConservatismSummary, WorkoutPrescription
 from app.schemas.state import UnifiedStateVector
 from app.schemas.training_goals import TRAINING_GOAL_DEFAULT, TrainingGoal
 from app.schemas.wellness import ReadinessScore
@@ -148,6 +149,44 @@ async def _e1rm_codes_for_names(db: AsyncSession, names: list[str]) -> dict[str,
     return {name: code for name, code in res.all() if code}
 
 
+async def _weak_point_tags_for_names(
+    db: AsyncSession, names: list[str]
+) -> dict[str, list[str]]:
+    """Catalog lookup: exercise name -> the weak-point tags that exercise addresses."""
+    if not names:
+        return {}
+    res = await db.execute(
+        select(Exercise.name, Exercise.weak_point_tags).where(Exercise.name.in_(names))
+    )
+    return {name: list(tags or []) for name, tags in res.all()}
+
+
+async def _enrich_exercises_with_weak_point_tags(
+    db: AsyncSession, rx: WorkoutPrescription, active_weak_points: list[str]
+) -> None:
+    """Tell the athlete which of THEIR flagged deficits each exercise addresses.
+
+    ``ExercisePrescription.weak_point_tags`` advertised exactly this and was never assigned
+    at any of the three construction sites, so it was always ``[]`` - the field claimed a
+    linkage the response never carried, which is why "which goals are being advanced" was
+    the weakest of the eight explanations.
+
+    Populated with the INTERSECTION of the exercise's catalog tags and the athlete's active
+    (unresolved) weak points, not the raw catalog tags. The catalog list says what an
+    exercise can address in general; the intersection says what it addresses for this
+    athlete, which is the question the explanation is actually asking. An empty list then
+    means "addresses none of your active weak points" - real information, not an absence.
+
+    Mutates ``rx.exercises`` in place. Read-only against the database.
+    """
+    if not rx.exercises or not active_weak_points:
+        return
+    tags_by_name = await _weak_point_tags_for_names(db, [ex.name for ex in rx.exercises])
+    active = set(active_weak_points)
+    for ex in rx.exercises:
+        ex.weak_point_tags = sorted(active.intersection(tags_by_name.get(ex.name, [])))
+
+
 async def _current_e1rm_values(
     db: AsyncSession, user_id: int, codes: set[str]
 ) -> dict[str, float]:
@@ -241,7 +280,31 @@ async def _enrich_exercises_with_load(
         current_axis = float(state.capacity_x.max_strength) if state is not None else None
         rules_by_code = await _standardization_rules_for_codes(db, set(code_by_name.values()))
 
-    rpe_cap = _envelope_rpe_cap(block_context)
+    baseline_rpe_cap = _envelope_rpe_cap(block_context)
+    # Uncertainty may make this session more cautious. Reads the confidence already
+    # attached to `rx.why` by finalize_prescription in phase 3, so the cap is driven by
+    # exactly the certainty the athlete is shown — not a second, separately-derived view.
+    conservatism = uncertainty_conservatism.decide(
+        baseline_rpe_cap=baseline_rpe_cap,
+        weakest_status=(
+            rx.why.confidence.weakest_capacity_status
+            if rx.why is not None and rx.why.confidence is not None
+            else None
+        ),
+        mode=getattr(
+            feature_flags, "UNCERTAINTY_CONSERVATISM", uncertainty_conservatism.MODE_OFF
+        ),
+    )
+    if rx.why is not None:
+        rx.why.conservatism = ConservatismSummary(
+            mode=conservatism.mode,
+            applied=conservatism.applied,
+            basis_status=conservatism.basis_status,
+            baseline_rpe_cap=conservatism.baseline_rpe_cap,
+            effective_rpe_cap=conservatism.effective_rpe_cap,
+            reason=conservatism.reason,
+        )
+    rpe_cap = conservatism.effective_rpe_cap
     for ex in rx.exercises:
         code = code_by_name.get(ex.name)
         e1rm = e1rm_by_code.get(code) if code else None
@@ -509,6 +572,8 @@ async def prescribe_for_athlete(
     # Phase 4 — ADR-0045: strength prescriptions speak in load — resolve %e1RM →
     # suggested kg (+ RPE cap) before persisting. Resolves shadow payloads; no writes.
     shadow_payloads = await _enrich_exercises_with_load(db, user_id, rx, ctx.block_context)
+    # Explanation #4: which of the athlete's own flagged deficits this session addresses.
+    await _enrich_exercises_with_weak_point_tags(db, rx, ctx.active_weak_points)
 
     # Phase 5 — persist the prescription (the production commit).
     await _persist_prescription(db, ctx.target_session, rx)

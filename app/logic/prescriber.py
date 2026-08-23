@@ -430,7 +430,11 @@ def _finalize(
         rationale=candidate.rationale,
         duration_min=candidate.duration_min,
     )
-    return finalize_prescription(rx, state, goal, candidate.branch_id, recent_sessions=recent_sessions)
+    return finalize_prescription(
+        rx, state, goal, candidate.branch_id,
+        recent_sessions=recent_sessions,
+        session_candidate=candidate,
+    )
 
 
 _EQUIPMENT_EXERCISE_MAP: dict[str, list[tuple[str, str, str]]] = {

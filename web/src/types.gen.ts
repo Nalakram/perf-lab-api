@@ -1453,6 +1453,47 @@ export interface components {
             connection?: components["schemas"]["WearableConnectionOut"] | null;
         };
         /**
+         * ConservatismSummary
+         * @description Whether the twin's own uncertainty made this session more cautious.
+         *
+         *     Reports the decision either way, including when it declined to act, so "the plan was not
+         *     softened" is visibly a choice rather than an absence. ``applied`` is the only field that
+         *     says the prescription actually changed - in ``shadow`` mode the reduction is described
+         *     but ``effective_rpe_cap`` still equals the baseline.
+         */
+        ConservatismSummary: {
+            /**
+             * Applied
+             * @description True only if the prescribed cap actually moved.
+             */
+            applied: boolean;
+            /**
+             * Baseline Rpe Cap
+             * @description The RPE cap the ADR-0029 envelope produced.
+             */
+            baseline_rpe_cap: number;
+            /**
+             * Basis Status
+             * @description Certainty of the weakest capacity axis, which is what the rule acts on.
+             */
+            basis_status?: ("established" | "provisional" | "insufficient") | null;
+            /**
+             * Effective Rpe Cap
+             * @description The cap actually used to resolve load.
+             */
+            effective_rpe_cap: number;
+            /**
+             * Mode
+             * @description off | shadow | on - the tri-state flag's value for this session.
+             */
+            mode: string;
+            /**
+             * Reason
+             * @description Why the rule did or did not act.
+             */
+            reason: string;
+        };
+        /**
          * DashboardBundleOut
          * @description Latest primary-anchor observations plus derived KPI snapshots.
          */
@@ -1594,6 +1635,38 @@ export interface components {
             sets?: number | null;
             /** Weak Point Tags */
             weak_point_tags?: string[];
+        };
+        /**
+         * ExpectedOutcome
+         * @description What the twin predicts this session will do to one state axis.
+         *
+         *     A point prediction from the engine's own forward model - the same path MPC rolls out
+         *     with - not a separate estimate invented for display. ``interval`` is deliberately
+         *     absent rather than fabricated: the forward model is deterministic and the fatigue and
+         *     tissue families carry no variance anywhere in the engine, so there is no honest spread
+         *     to report. See ``PrescriptionConfidence.uncertainty_not_modelled``.
+         */
+        ExpectedOutcome: {
+            /**
+             * Axis
+             * @description State axis the prediction is about, e.g. 'fatigue_f.cns'.
+             */
+            axis: string;
+            /**
+             * Current
+             * @description Where the axis sits before the session.
+             */
+            current: number;
+            /**
+             * Delta
+             * @description predicted - current. Positive means the session adds load.
+             */
+            delta: number;
+            /**
+             * Predicted
+             * @description Where the forward model puts it immediately after.
+             */
+            predicted: number;
         };
         /**
          * ExternalIntensity
@@ -1868,6 +1941,38 @@ export interface components {
             start_date?: string | null;
             status?: components["schemas"]["MacrocycleStatus"] | null;
         };
+        /**
+         * MeasurementRecommendation
+         * @description What to measure next to make the twin less unsure about THIS goal.
+         *
+         *     The goal's rule is that a missing optional measurement should reduce certainty rather
+         *     than make the app unusable — so the honest response to low confidence is to say what
+         *     would raise it. Ranked so an axis the athlete's own goal actually trains outranks an
+         *     equally-uncertain axis they never touch.
+         */
+        MeasurementRecommendation: {
+            /**
+             * Axis
+             * @description Capacity axis whose uncertainty a measurement would reduce.
+             */
+            axis: string;
+            /**
+             * Current Status
+             * @description The axis's certainty band right now.
+             * @enum {string}
+             */
+            current_status: "established" | "provisional" | "insufficient";
+            /**
+             * Material To Goal
+             * @description Whether this axis is one the athlete's current goal domain actually trains.
+             */
+            material_to_goal: boolean;
+            /**
+             * Reason
+             * @description Why this axis is worth measuring.
+             */
+            reason: string;
+        };
         /** MetricsRequest */
         MetricsRequest: {
             /** Age */
@@ -2075,6 +2180,47 @@ export interface components {
              */
             token: string;
         };
+        /**
+         * PlanRevisionTrigger
+         * @description A concrete state change that would make this session the wrong call.
+         *
+         *     Every driver is a threshold test, so each one already implies its own falsification
+         *     condition: the crossing that would start it applying, or stop it. Surfacing those turns
+         *     "here is your session" into "here is your session, and here is what would change it" -
+         *     without any new modelling, because the thresholds are the same ones the prescriber used.
+         */
+        PlanRevisionTrigger: {
+            /**
+             * Axis
+             * @description State field this trigger watches.
+             */
+            axis: string;
+            /**
+             * Condition
+             * @description The crossing that would revise the plan.
+             */
+            condition: string;
+            /**
+             * Current Value
+             * @description Where the axis sits today.
+             */
+            current_value: number;
+            /**
+             * Currently Active
+             * @description True if this driver is firing now, so the trigger describes it switching OFF.
+             */
+            currently_active: boolean;
+            /**
+             * Label
+             * @description The driver that would start or stop applying.
+             */
+            label: string;
+            /**
+             * Threshold
+             * @description The value it would have to cross.
+             */
+            threshold: number;
+        };
         /** PlannedSessionRead */
         PlannedSessionRead: {
             /** Benchmark Key */
@@ -2121,17 +2267,75 @@ export interface components {
             status?: components["schemas"]["SessionStatus"] | null;
         };
         /**
+         * PrescriptionConfidence
+         * @description How certain the twin is about the state this prescription was built on.
+         *
+         *     Derived from the live per-axis ``capacity_confidence`` variance via the shared
+         *     ``confidence_presentation_policy``. Reported, not yet acted on: nothing in the
+         *     prescriber currently widens or narrows a recommendation based on these bands.
+         */
+        PrescriptionConfidence: {
+            /**
+             * Capacity Axes
+             * @description Per-capacity-axis certainty band derived from live variance.
+             */
+            capacity_axes?: {
+                [key: string]: "established" | "provisional" | "insufficient";
+            };
+            /**
+             * Policy Version
+             * @description Confidence-presentation policy that produced the bands.
+             */
+            policy_version: string;
+            /**
+             * Uncertainty Not Modelled
+             * @description State families the engine keeps NO uncertainty for. Their contribution to this prescription has unknown certainty; the absence is reported rather than being allowed to read as confidence.
+             */
+            uncertainty_not_modelled?: string[];
+            /**
+             * Weakest Capacity Axis
+             * @description The least certain capacity axis — the one that should most constrain trust.
+             */
+            weakest_capacity_axis?: string | null;
+            /** Weakest Capacity Status */
+            weakest_capacity_status?: ("established" | "provisional" | "insufficient") | null;
+        };
+        /**
          * PrescriptionExplanation
          * @description Why this session — state drivers, constraints, sources.
          */
         PrescriptionExplanation: {
+            /** @description Certainty of the twin state this session was built on. NULL when no state exists. */
+            confidence?: components["schemas"]["PrescriptionConfidence"] | null;
+            /** @description Whether low confidence made this session more cautious. NULL when load was never resolved for this prescription (no lift with a current e1RM). */
+            conservatism?: components["schemas"]["ConservatismSummary"] | null;
             /** Constraints Applied */
             constraints_applied?: string[];
+            /**
+             * Expected Outcome Horizon
+             * @description What the prediction is *of*, so it cannot be read as a longer-range claim.
+             */
+            expected_outcome_horizon?: string | null;
+            /**
+             * Expected Outcomes
+             * @description What this session is predicted to do, largest movement first, from the engine's forward model. Point predictions with no interval - the model is deterministic and these axes carry no variance. Empty when no state exists to predict from.
+             */
+            expected_outcomes?: components["schemas"]["ExpectedOutcome"][];
             /**
              * Goal Alignment
              * @default
              */
             goal_alignment: string;
+            /**
+             * Measurement Recommendations
+             * @description What to measure to sharpen this plan, worst-first with goal-relevant axes prioritised. Empty when every capacity axis is already established.
+             */
+            measurement_recommendations?: components["schemas"]["MeasurementRecommendation"][];
+            /**
+             * Plan Revision Triggers
+             * @description What would change this plan: the drivers currently applying that would switch off, and the nearest ones that would switch on. Derived from the same thresholds the prescriber used, so they cannot disagree.
+             */
+            plan_revision_triggers?: components["schemas"]["PlanRevisionTrigger"][];
             /**
              * Prescription Branch
              * @description Internal prescriber branch id (safety, readiness, goal path)
@@ -2149,6 +2353,11 @@ export interface components {
             source_alignment?: string[];
             /** State Drivers */
             state_drivers?: string[];
+            /**
+             * State Evidence
+             * @description The numbers behind ``state_drivers``, one entry per driver that fired. Empty when no driver fired, or when there is no athlete state yet.
+             */
+            state_evidence?: components["schemas"]["StateEvidence"][];
             /**
              * Structured Template Name
              * @description Display name for structured coaching template (v2)
@@ -2603,6 +2812,49 @@ export interface components {
             unknown_today?: string[];
             /** Untracked */
             untracked?: string[];
+        };
+        /**
+         * StateEvidence
+         * @description The measurement behind one state driver, not just the phrase it produced.
+         *
+         *     ``state_drivers`` collapses a threshold test to a string ("elevated CNS / central
+         *     fatigue"), discarding the number that fired it — so a client can read *what* the
+         *     system concluded but never *what it saw*. Each entry here is the same test with its
+         *     evidence intact, emitted from the same rule table, so the label and the number cannot
+         *     disagree.
+         */
+        StateEvidence: {
+            /**
+             * Axis
+             * @description State field the test read, e.g. 'f_nm_central'.
+             */
+            axis: string;
+            /**
+             * Confidence Status
+             * @description Certainty band for this axis, when the axis has a variance model. NULL means the engine models no uncertainty for it at all (fatigue, tissue and skill carry no variance) — that is UNKNOWN certainty, not high certainty.
+             */
+            confidence_status?: ("established" | "provisional" | "insufficient") | null;
+            /**
+             * Direction
+             * @description Whether firing means the value sat above or below the threshold.
+             * @enum {string}
+             */
+            direction: "above" | "below";
+            /**
+             * Label
+             * @description The human-readable driver this produced.
+             */
+            label: string;
+            /**
+             * Threshold
+             * @description The threshold it was compared against.
+             */
+            threshold: number;
+            /**
+             * Value
+             * @description The observed value on that axis.
+             */
+            value: number;
         };
         /**
          * StateHistorySnapshotRead

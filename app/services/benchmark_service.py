@@ -26,6 +26,7 @@ from app.models.weak_point import WeakPoint, WeakPointSource
 from app.models.workout_log import WorkoutLog
 from app.models.workout_set_log import WorkoutSetLog
 from app.schemas.benchmarks import BenchmarkObservationCreate, BenchmarkObservationRead
+from app.schemas.state import UnifiedStateVector
 from app.services import (
     capacity_floor_shadow_service,
     state_service,
@@ -396,6 +397,9 @@ async def create_observation(
         # A prior seeds an uncertain twin; it may not overwrite an established one.
         if await state_service.load_current_state(db, user_id) is not None:
             apply_state = False
+    # Set by the deferred floor-ratchet branch below. The shadow row is written only
+    # AFTER the commit, so a capture failure cannot abort the observation it describes.
+    floor_shadow_candidate: tuple[UnifiedStateVector, UnifiedStateVector] | None = None
     if apply_state:
         current = await state_service.load_or_init_current_state(db, user_id)
 
@@ -459,11 +463,7 @@ async def create_observation(
             observed_at=observation_time,
             score01=score01,
         )
-        floored = floor_capacity_at_prior(current, candidate)
-        await capacity_floor_shadow_service.record_floor_candidate(
-            db, user_id, observation=obs, benchmark_code=body.benchmark_code,
-            prior=current, floored=floored,
-        )
+        floor_shadow_candidate = (current, floor_capacity_at_prior(current, candidate))
 
     # Weak-point feedback: flag deficits, resolve improvements. Gated on measurement-
     # grade (bidirectional) authority — training-derived / estimated / seeding evidence
@@ -474,6 +474,17 @@ async def create_observation(
         )
 
     await db.commit()
+
+    # Deferred floor-ratchet candidate (ADR-0058). Written here, after the observation is
+    # durable, and in its own best-effort transaction: db.add() stages in memory and does
+    # no I/O, so while this rode the live transaction a bad row surfaced at the commit
+    # above and failed the primary write.
+    if floor_shadow_candidate is not None:
+        prior_state, floored_state = floor_shadow_candidate
+        await capacity_floor_shadow_service.record_floor_candidate(
+            db, user_id, observation=obs, benchmark_code=body.benchmark_code,
+            prior=prior_state, floored=floored_state,
+        )
 
     # Shadow EKF (ADR-0041): assimilate this benchmark into the parallel full-covariance
     # belief. Best-effort and capture-only — never affects the returned observation.

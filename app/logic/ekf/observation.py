@@ -184,14 +184,58 @@ def build_wellness_observation(wellness: object, params: EngineParameters) -> Ob
     )
 
 
+@dataclass
+class PredictiveMoments:
+    """The filter's belief about an observation BEFORE it sees it.
+
+    ADR-0041 names two calibration arms: NIS chi-squared and interval coverage. Only the
+    first was ever computable, because ``ekf_shadow_log`` stores ``nis``/``n_obs`` but not
+    the per-observation predictive spread — and nothing in the codebase exposed it, so a
+    caller wanting coverage had no honest way to get it.
+
+    These are exactly the quantities the update already forms internally
+    (``mean = H x``, ``S = H P Hᵀ + R``). Sharing one code path with :func:`update` is the
+    point: a separately-derived copy could drift, and a coverage figure computed from a
+    drifted spread would look plausible and be wrong.
+    """
+
+    mean: np.ndarray
+    """Predicted observation value per row — what the filter expects to see."""
+    std: np.ndarray
+    """Predicted standard deviation per row — sqrt of the innovation covariance diagonal."""
+    innovation_cov: np.ndarray
+    """Full innovation covariance S, kept so the update need not recompute it."""
+
+
+def predictive_moments(belief: EkfBelief, obs: Observation) -> PredictiveMoments:
+    """What the filter predicts for this observation, before the correction is applied.
+
+    ``std`` is the predictive spread including measurement noise R, which is the correct
+    denominator for interval coverage: coverage asks how often the REALIZED value lands
+    inside the interval, and a realized benchmark carries measurement noise too. Using the
+    state spread alone would report systematic under-coverage that is an artefact of the
+    wrong denominator rather than a mis-calibrated filter.
+    """
+    H, R = obs.H, obs.R
+    predicted = H @ belief.mean
+    S = H @ belief.cov @ H.T + R
+    # Guard the diagonal: a stabilized covariance is PSD, but floating point can leave a
+    # diagonal entry fractionally negative, and sqrt of that is nan rather than an error.
+    std = np.sqrt(np.maximum(np.diag(S), 0.0))
+    return PredictiveMoments(mean=predicted, std=std, innovation_cov=S)
+
+
 def update(belief: EkfBelief, obs: Observation, params: EngineParameters) -> UpdateResult:
     """Joseph-form EKF measurement update. PSD-stable across many updates."""
     H, y, R = obs.H, obs.y, obs.R
     P = belief.cov
     trace_pre = float(np.trace(P))
 
-    innovation = y - H @ belief.mean
-    S = H @ P @ H.T + R
+    # One source of truth for the predictive moments: the same S that scores interval
+    # coverage is the S this update inverts, so the two can never disagree.
+    moments = predictive_moments(belief, obs)
+    innovation = y - moments.mean
+    S = moments.innovation_cov
     # K = P Hᵀ S⁻¹, computed via a solve (S symmetric) — avoids an explicit inverse.
     K = np.linalg.solve(S, H @ P).T
     # Normalized innovation squared: for a well-calibrated filter E[NIS] = dim(y).

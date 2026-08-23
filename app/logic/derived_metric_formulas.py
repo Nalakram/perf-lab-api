@@ -27,10 +27,30 @@ def hinshaw_fatigue_factor(ctx: Mapping[str, Any]) -> float:
 
 
 def relative_total(ctx: Mapping[str, Any]) -> float:
+    """Projected total per kg of the athlete's OWN bodyweight.
+
+    Raises ``ValueError`` when bodyweight is absent rather than substituting a
+    population figure. This previously read ``float(ctx.get("bodyweight_kg") or 0.0)``
+    and then ``if bw < 40.0: bw = 75.0``, which did two dishonest things at once: it
+    invented a 75 kg divisor for an athlete with no bodyweight on file, and it
+    overwrote a *real* measurement below 40 kg with that same figure. The resulting
+    ratio was persisted at ``confidence=1.0`` (dashboard_service.py:204 — nothing
+    errored, so there was no note to lower it) and gates two complementary prescription
+    templates at ``pl_relative_total < 3.0`` (candidate_library.py:351, :371). A
+    fabricated divisor therefore chose an athlete's session.
+
+    Raising is the correct signal here: ``_compute_derived_value`` maps a failed custom
+    formula to ``(None, [], ...)`` and ``recompute_derived_metrics`` skips writing a
+    snapshot for a ``None`` value, so the KPI is simply absent — which is what an
+    unmeasured athlete's relative total actually is.
+    """
     total = float(ctx["pl_projected_total"])
-    bw = float(ctx.get("bodyweight_kg") or 0.0)
-    if bw < 40.0:
-        bw = 75.0
+    raw_bw = ctx.get("bodyweight_kg")
+    if raw_bw is None:
+        raise ValueError("bodyweight_kg is required for relative_total and is missing")
+    bw = float(raw_bw)
+    if bw <= 0.0:
+        raise ValueError(f"bodyweight_kg must be positive, got {bw!r}")
     return total / bw
 
 

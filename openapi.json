@@ -1508,6 +1508,62 @@
         "title": "ConnectionStatus",
         "type": "object"
       },
+      "ConservatismSummary": {
+        "description": "Whether the twin's own uncertainty made this session more cautious.\n\nReports the decision either way, including when it declined to act, so \"the plan was not\nsoftened\" is visibly a choice rather than an absence. ``applied`` is the only field that\nsays the prescription actually changed - in ``shadow`` mode the reduction is described\nbut ``effective_rpe_cap`` still equals the baseline.",
+        "properties": {
+          "applied": {
+            "description": "True only if the prescribed cap actually moved.",
+            "title": "Applied",
+            "type": "boolean"
+          },
+          "baseline_rpe_cap": {
+            "description": "The RPE cap the ADR-0029 envelope produced.",
+            "title": "Baseline Rpe Cap",
+            "type": "number"
+          },
+          "basis_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty of the weakest capacity axis, which is what the rule acts on.",
+            "title": "Basis Status"
+          },
+          "effective_rpe_cap": {
+            "description": "The cap actually used to resolve load.",
+            "title": "Effective Rpe Cap",
+            "type": "number"
+          },
+          "mode": {
+            "description": "off | shadow | on - the tri-state flag's value for this session.",
+            "title": "Mode",
+            "type": "string"
+          },
+          "reason": {
+            "description": "Why the rule did or did not act.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "mode",
+          "applied",
+          "baseline_rpe_cap",
+          "effective_rpe_cap",
+          "reason"
+        ],
+        "title": "ConservatismSummary",
+        "type": "object"
+      },
       "DashboardBundleOut": {
         "description": "Latest primary-anchor observations plus derived KPI snapshots.",
         "properties": {
@@ -2008,6 +2064,39 @@
         "title": "ExercisePrescription",
         "type": "object"
       },
+      "ExpectedOutcome": {
+        "description": "What the twin predicts this session will do to one state axis.\n\nA point prediction from the engine's own forward model - the same path MPC rolls out\nwith - not a separate estimate invented for display. ``interval`` is deliberately\nabsent rather than fabricated: the forward model is deterministic and the fatigue and\ntissue families carry no variance anywhere in the engine, so there is no honest spread\nto report. See ``PrescriptionConfidence.uncertainty_not_modelled``.",
+        "properties": {
+          "axis": {
+            "description": "State axis the prediction is about, e.g. 'fatigue_f.cns'.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "current": {
+            "description": "Where the axis sits before the session.",
+            "title": "Current",
+            "type": "number"
+          },
+          "delta": {
+            "description": "predicted - current. Positive means the session adds load.",
+            "title": "Delta",
+            "type": "number"
+          },
+          "predicted": {
+            "description": "Where the forward model puts it immediately after.",
+            "title": "Predicted",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "current",
+          "predicted",
+          "delta"
+        ],
+        "title": "ExpectedOutcome",
+        "type": "object"
+      },
       "ExternalIntensity": {
         "description": "The session-scalar external intensity ``I`` that entered the dose base (ADR-0039).\n\nModel A: a weighted session-level intensity replaces the old hardcoded ``1.0``.\n``value`` is what the dose law raised to ``dose_alpha``; ``fallback_path`` names\nthe rung that dominated; ``known_limitation`` records the ADR-0054 routing caveat\n(a session scalar shapes every exercise via the aggregate-\u03c6 path, so a hard\naccessory partially inherits the session's intensity).",
         "properties": {
@@ -2496,6 +2585,44 @@
           }
         },
         "title": "MacrocycleUpdate",
+        "type": "object"
+      },
+      "MeasurementRecommendation": {
+        "description": "What to measure next to make the twin less unsure about THIS goal.\n\nThe goal's rule is that a missing optional measurement should reduce certainty rather\nthan make the app unusable \u2014 so the honest response to low confidence is to say what\nwould raise it. Ranked so an axis the athlete's own goal actually trains outranks an\nequally-uncertain axis they never touch.",
+        "properties": {
+          "axis": {
+            "description": "Capacity axis whose uncertainty a measurement would reduce.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "current_status": {
+            "description": "The axis's certainty band right now.",
+            "enum": [
+              "established",
+              "provisional",
+              "insufficient"
+            ],
+            "title": "Current Status",
+            "type": "string"
+          },
+          "material_to_goal": {
+            "description": "Whether this axis is one the athlete's current goal domain actually trains.",
+            "title": "Material To Goal",
+            "type": "boolean"
+          },
+          "reason": {
+            "description": "Why this axis is worth measuring.",
+            "title": "Reason",
+            "type": "string"
+          }
+        },
+        "required": [
+          "axis",
+          "current_status",
+          "material_to_goal",
+          "reason"
+        ],
+        "title": "MeasurementRecommendation",
         "type": "object"
       },
       "MetricsRequest": {
@@ -3158,6 +3285,51 @@
         "title": "PatConnectRequest",
         "type": "object"
       },
+      "PlanRevisionTrigger": {
+        "description": "A concrete state change that would make this session the wrong call.\n\nEvery driver is a threshold test, so each one already implies its own falsification\ncondition: the crossing that would start it applying, or stop it. Surfacing those turns\n\"here is your session\" into \"here is your session, and here is what would change it\" -\nwithout any new modelling, because the thresholds are the same ones the prescriber used.",
+        "properties": {
+          "axis": {
+            "description": "State field this trigger watches.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "condition": {
+            "description": "The crossing that would revise the plan.",
+            "title": "Condition",
+            "type": "string"
+          },
+          "current_value": {
+            "description": "Where the axis sits today.",
+            "title": "Current Value",
+            "type": "number"
+          },
+          "currently_active": {
+            "description": "True if this driver is firing now, so the trigger describes it switching OFF.",
+            "title": "Currently Active",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "The driver that would start or stop applying.",
+            "title": "Label",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The value it would have to cross.",
+            "title": "Threshold",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "label",
+          "currently_active",
+          "condition",
+          "current_value",
+          "threshold"
+        ],
+        "title": "PlanRevisionTrigger",
+        "type": "object"
+      },
       "PlannedSessionRead": {
         "properties": {
           "benchmark_key": {
@@ -3307,9 +3479,95 @@
         "title": "PlannedSessionUpdateRequest",
         "type": "object"
       },
+      "PrescriptionConfidence": {
+        "description": "How certain the twin is about the state this prescription was built on.\n\nDerived from the live per-axis ``capacity_confidence`` variance via the shared\n``confidence_presentation_policy``. Reported, not yet acted on: nothing in the\nprescriber currently widens or narrows a recommendation based on these bands.",
+        "properties": {
+          "capacity_axes": {
+            "additionalProperties": {
+              "enum": [
+                "established",
+                "provisional",
+                "insufficient"
+              ],
+              "type": "string"
+            },
+            "description": "Per-capacity-axis certainty band derived from live variance.",
+            "title": "Capacity Axes",
+            "type": "object"
+          },
+          "policy_version": {
+            "description": "Confidence-presentation policy that produced the bands.",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "uncertainty_not_modelled": {
+            "description": "State families the engine keeps NO uncertainty for. Their contribution to this prescription has unknown certainty; the absence is reported rather than being allowed to read as confidence.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Uncertainty Not Modelled",
+            "type": "array"
+          },
+          "weakest_capacity_axis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The least certain capacity axis \u2014 the one that should most constrain trust.",
+            "title": "Weakest Capacity Axis"
+          },
+          "weakest_capacity_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weakest Capacity Status"
+          }
+        },
+        "required": [
+          "policy_version"
+        ],
+        "title": "PrescriptionConfidence",
+        "type": "object"
+      },
       "PrescriptionExplanation": {
         "description": "Why this session \u2014 state drivers, constraints, sources.",
         "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrescriptionConfidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty of the twin state this session was built on. NULL when no state exists."
+          },
+          "conservatism": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/ConservatismSummary"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Whether low confidence made this session more cautious. NULL when load was never resolved for this prescription (no lift with a current e1RM)."
+          },
           "constraints_applied": {
             "items": {
               "type": "string"
@@ -3317,10 +3575,46 @@
             "title": "Constraints Applied",
             "type": "array"
           },
+          "expected_outcome_horizon": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the prediction is *of*, so it cannot be read as a longer-range claim.",
+            "title": "Expected Outcome Horizon"
+          },
+          "expected_outcomes": {
+            "description": "What this session is predicted to do, largest movement first, from the engine's forward model. Point predictions with no interval - the model is deterministic and these axes carry no variance. Empty when no state exists to predict from.",
+            "items": {
+              "$ref": "#/components/schemas/ExpectedOutcome"
+            },
+            "title": "Expected Outcomes",
+            "type": "array"
+          },
           "goal_alignment": {
             "default": "",
             "title": "Goal Alignment",
             "type": "string"
+          },
+          "measurement_recommendations": {
+            "description": "What to measure to sharpen this plan, worst-first with goal-relevant axes prioritised. Empty when every capacity axis is already established.",
+            "items": {
+              "$ref": "#/components/schemas/MeasurementRecommendation"
+            },
+            "title": "Measurement Recommendations",
+            "type": "array"
+          },
+          "plan_revision_triggers": {
+            "description": "What would change this plan: the drivers currently applying that would switch off, and the nearest ones that would switch on. Derived from the same thresholds the prescriber used, so they cannot disagree.",
+            "items": {
+              "$ref": "#/components/schemas/PlanRevisionTrigger"
+            },
+            "title": "Plan Revision Triggers",
+            "type": "array"
           },
           "prescription_branch": {
             "anyOf": [
@@ -3359,6 +3653,14 @@
               "type": "string"
             },
             "title": "State Drivers",
+            "type": "array"
+          },
+          "state_evidence": {
+            "description": "The numbers behind ``state_drivers``, one entry per driver that fired. Empty when no driver fired, or when there is no athlete state yet.",
+            "items": {
+              "$ref": "#/components/schemas/StateEvidence"
+            },
+            "title": "State Evidence",
             "type": "array"
           },
           "structured_template_name": {
@@ -4616,6 +4918,66 @@
           }
         },
         "title": "SignalSummary",
+        "type": "object"
+      },
+      "StateEvidence": {
+        "description": "The measurement behind one state driver, not just the phrase it produced.\n\n``state_drivers`` collapses a threshold test to a string (\"elevated CNS / central\nfatigue\"), discarding the number that fired it \u2014 so a client can read *what* the\nsystem concluded but never *what it saw*. Each entry here is the same test with its\nevidence intact, emitted from the same rule table, so the label and the number cannot\ndisagree.",
+        "properties": {
+          "axis": {
+            "description": "State field the test read, e.g. 'f_nm_central'.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "confidence_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty band for this axis, when the axis has a variance model. NULL means the engine models no uncertainty for it at all (fatigue, tissue and skill carry no variance) \u2014 that is UNKNOWN certainty, not high certainty.",
+            "title": "Confidence Status"
+          },
+          "direction": {
+            "description": "Whether firing means the value sat above or below the threshold.",
+            "enum": [
+              "above",
+              "below"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "label": {
+            "description": "The human-readable driver this produced.",
+            "title": "Label",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The threshold it was compared against.",
+            "title": "Threshold",
+            "type": "number"
+          },
+          "value": {
+            "description": "The observed value on that axis.",
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "label",
+          "value",
+          "threshold",
+          "direction"
+        ],
+        "title": "StateEvidence",
         "type": "object"
       },
       "StateHistorySnapshotRead": {
