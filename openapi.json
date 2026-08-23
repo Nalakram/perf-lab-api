@@ -2064,6 +2064,39 @@
         "title": "ExercisePrescription",
         "type": "object"
       },
+      "ExpectedOutcome": {
+        "description": "What the twin predicts this session will do to one state axis.\n\nA point prediction from the engine's own forward model - the same path MPC rolls out\nwith - not a separate estimate invented for display. ``interval`` is deliberately\nabsent rather than fabricated: the forward model is deterministic and the fatigue and\ntissue families carry no variance anywhere in the engine, so there is no honest spread\nto report. See ``PrescriptionConfidence.uncertainty_not_modelled``.",
+        "properties": {
+          "axis": {
+            "description": "State axis the prediction is about, e.g. 'fatigue_f.cns'.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "current": {
+            "description": "Where the axis sits before the session.",
+            "title": "Current",
+            "type": "number"
+          },
+          "delta": {
+            "description": "predicted - current. Positive means the session adds load.",
+            "title": "Delta",
+            "type": "number"
+          },
+          "predicted": {
+            "description": "Where the forward model puts it immediately after.",
+            "title": "Predicted",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "current",
+          "predicted",
+          "delta"
+        ],
+        "title": "ExpectedOutcome",
+        "type": "object"
+      },
       "ExternalIntensity": {
         "description": "The session-scalar external intensity ``I`` that entered the dose base (ADR-0039).\n\nModel A: a weighted session-level intensity replaces the old hardcoded ``1.0``.\n``value`` is what the dose law raised to ``dose_alpha``; ``fallback_path`` names\nthe rung that dominated; ``known_limitation`` records the ADR-0054 routing caveat\n(a session scalar shapes every exercise via the aggregate-\u03c6 path, so a hard\naccessory partially inherits the session's intensity).",
         "properties": {
@@ -3540,6 +3573,26 @@
               "type": "string"
             },
             "title": "Constraints Applied",
+            "type": "array"
+          },
+          "expected_outcome_horizon": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "What the prediction is *of*, so it cannot be read as a longer-range claim.",
+            "title": "Expected Outcome Horizon"
+          },
+          "expected_outcomes": {
+            "description": "What this session is predicted to do, largest movement first, from the engine's forward model. Point predictions with no interval - the model is deterministic and these axes carry no variance. Empty when no state exists to predict from.",
+            "items": {
+              "$ref": "#/components/schemas/ExpectedOutcome"
+            },
+            "title": "Expected Outcomes",
             "type": "array"
           },
           "goal_alignment": {

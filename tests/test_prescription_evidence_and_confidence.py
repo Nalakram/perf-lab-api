@@ -13,17 +13,24 @@ label before discarding it.
 
 from datetime import UTC, datetime
 
+import pytest
+
 from app.domain.vectors import CapacityConfidence
 from app.logic.confidence_presentation import POLICY_VERSION
 from app.logic.prescription_finalize import (
+    EXPECTED_OUTCOME_HORIZON,
+    MAX_EXPECTED_OUTCOMES,
     MAX_INACTIVE_TRIGGERS,
+    MIN_REPORTABLE_DELTA,
     NO_DRIVERS_LABEL,
     UNCERTAINTY_NOT_MODELLED,
     _derive_confidence,
+    _derive_expected_outcomes,
     _derive_measurement_recommendations,
     _derive_plan_revision_triggers,
     _derive_state_drivers,
     _derive_state_evidence,
+    finalize_prescription,
 )
 from app.schemas.state import UnifiedStateVector
 
@@ -288,3 +295,112 @@ def test_approaching_triggers_are_capped_but_active_ones_are_never_dropped() -> 
 
     assert len(active) == 6, [t.axis for t in active]
     assert len(inactive) <= MAX_INACTIVE_TRIGGERS
+
+
+# ── expected outcomes: a real forecast, or none at all ────────────────────────
+
+
+def _candidate_rx(state):
+    """A finalized prescription built the way the prescriber builds one."""
+    from app.logic.prescriber import recommend_next_session
+
+    return recommend_next_session(state, "powerlifting")
+
+
+def test_a_session_carries_a_forecast_from_the_engines_own_model() -> None:
+    rx = _candidate_rx(_state())
+
+    assert rx.why is not None
+    assert rx.why.expected_outcomes, "no forecast produced"
+    assert all(o.delta != 0 for o in rx.why.expected_outcomes)
+
+
+def test_the_forecast_matches_an_independent_forward_step() -> None:
+    """Pins that this IS the engine's forward model, not a display-only reimplementation.
+
+    Recomputing the same one-step rollout must reproduce the published numbers exactly. If
+    these ever diverge, the athlete is shown a forecast the planner does not share - which
+    would make the loop's later prediction-error measurement meaningless.
+    """
+    from datetime import timedelta
+
+    from app.logic.constraint_engine.candidate import SessionCandidate
+    from app.logic.dose_engine_v0 import calculate_stress_dose
+    from app.logic.mpc.candidate_dose import candidate_to_log
+    from app.logic.state_update_v0 import update_athlete_state
+
+    state = _state()
+    candidate = SessionCandidate(
+        type="Strength", focus="Squat", rationale="r", duration_min=60, branch_id="t"
+    )
+
+    published = _derive_expected_outcomes(state, candidate)
+    assert published, "no forecast produced for a valid candidate"
+
+    log = candidate_to_log(candidate, state.timestamp)
+    expected_state = update_athlete_state(state, calculate_stress_dose(log), timedelta(0), log)
+
+    for o in published:
+        key = o.axis.split(".", 1)[1]
+        assert o.predicted == pytest.approx(
+            round(float(getattr(expected_state.fatigue_f, key)), 3)
+        ), o.axis
+
+
+def test_outcomes_are_largest_movement_first_and_capped() -> None:
+    rx = _candidate_rx(_state())
+    assert rx.why is not None
+    deltas = [abs(o.delta) for o in rx.why.expected_outcomes]
+
+    assert deltas == sorted(deltas, reverse=True)
+    assert len(rx.why.expected_outcomes) <= MAX_EXPECTED_OUTCOMES
+
+
+def test_every_reported_movement_clears_the_noise_floor() -> None:
+    """A sub-threshold wiggle is engine noise, not a claim worth publishing."""
+    rx = _candidate_rx(_state())
+    assert rx.why is not None
+
+    for o in rx.why.expected_outcomes:
+        assert abs(o.delta) >= MIN_REPORTABLE_DELTA
+
+
+def test_the_horizon_is_always_stated() -> None:
+    """A one-step prediction must not be readable as a longer-range claim."""
+    rx = _candidate_rx(_state())
+    assert rx.why is not None
+
+    assert rx.why.expected_outcome_horizon == EXPECTED_OUTCOME_HORIZON
+    assert "after this session" in rx.why.expected_outcome_horizon
+
+
+def test_without_a_candidate_there_is_no_forecast_rather_than_a_guess() -> None:
+    """finalize_prescription's older signature still works, and degrades honestly.
+
+    A missing forward-model input yields no prediction at all - never an invented one.
+    """
+    from app.schemas.prescription import ExercisePrescription, WorkoutPrescription
+
+    rx = WorkoutPrescription(
+        type="Strength", focus="Squat", rationale="r", duration_min=60,
+        exercises=[ExercisePrescription(name="Back Squat", sets=5, reps="5")],
+    )
+    out = finalize_prescription(rx, _state(), "powerlifting", "b")
+
+    assert out.why is not None
+    assert out.why.expected_outcomes == []
+
+
+def test_a_failing_forecast_does_not_break_the_prescription(monkeypatch) -> None:
+    """An explanation must never be a reason to fail the session it explains."""
+    import app.logic.mpc.candidate_dose as cd
+
+    def _boom(*_a, **_k):
+        raise RuntimeError("forward model exploded")
+
+    monkeypatch.setattr(cd, "candidate_to_log", _boom)
+    rx = _candidate_rx(_state())
+
+    assert rx.why is not None
+    assert rx.why.expected_outcomes == []
+    assert rx.type, "the prescription itself must survive"

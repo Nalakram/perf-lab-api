@@ -129,6 +129,22 @@ class ConservatismSummary(BaseModel):
     reason: str = Field(description="Why the rule did or did not act.")
 
 
+class ExpectedOutcome(BaseModel):
+    """What the twin predicts this session will do to one state axis.
+
+    A point prediction from the engine's own forward model - the same path MPC rolls out
+    with - not a separate estimate invented for display. ``interval`` is deliberately
+    absent rather than fabricated: the forward model is deterministic and the fatigue and
+    tissue families carry no variance anywhere in the engine, so there is no honest spread
+    to report. See ``PrescriptionConfidence.uncertainty_not_modelled``.
+    """
+
+    axis: str = Field(description="State axis the prediction is about, e.g. 'fatigue_f.cns'.")
+    current: float = Field(description="Where the axis sits before the session.")
+    predicted: float = Field(description="Where the forward model puts it immediately after.")
+    delta: float = Field(description="predicted - current. Positive means the session adds load.")
+
+
 class PrescriptionExplanation(BaseModel):
     """Why this session — state drivers, constraints, sources."""
 
@@ -154,6 +170,18 @@ class PrescriptionExplanation(BaseModel):
             "off, and the nearest ones that would switch on. Derived from the same "
             "thresholds the prescriber used, so they cannot disagree."
         ),
+    )
+    expected_outcomes: list[ExpectedOutcome] = Field(
+        default_factory=lambda: [],
+        description=(
+            "What this session is predicted to do, largest movement first, from the engine's "
+            "forward model. Point predictions with no interval - the model is deterministic "
+            "and these axes carry no variance. Empty when no state exists to predict from."
+        ),
+    )
+    expected_outcome_horizon: str | None = Field(
+        default=None,
+        description="What the prediction is *of*, so it cannot be read as a longer-range claim.",
     )
     conservatism: "ConservatismSummary | None" = Field(
         default=None,

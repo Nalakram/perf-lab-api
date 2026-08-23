@@ -1,7 +1,9 @@
 """Attach provenance, validation, explainability, and structured-template scoring."""
 
+import logging
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any, Literal
 
 from app.domain.vectors import CapacityConfidence
@@ -17,6 +19,7 @@ from app.logic.constraint_engine import (
     encode_session_candidate,
     simple_session_scorer,
 )
+from app.logic.constraint_engine.candidate import SessionCandidate
 from app.logic.goal_seed_emphasis import GOAL_AXIS_FLOOR, domain_for_goal
 from app.logic.registries import (
     get_fallback_template,
@@ -24,6 +27,7 @@ from app.logic.registries import (
     primitive_names,
 )
 from app.schemas.prescription import (
+    ExpectedOutcome,
     MeasurementRecommendation,
     PlanRevisionTrigger,
     PrescriptionConfidence,
@@ -34,6 +38,8 @@ from app.schemas.prescription import (
 )
 from app.schemas.state import UnifiedStateVector
 from app.schemas.training_goals import TrainingGoal
+
+logger = logging.getLogger(__name__)
 
 NO_DRIVERS_LABEL = "state within normal twin bands for prescription"
 MAX_DRIVERS = 8
@@ -266,17 +272,88 @@ def _derive_plan_revision_triggers(state: UnifiedStateVector) -> list[PlanRevisi
     return active + [t for _, t in approaching[:MAX_INACTIVE_TRIGGERS]]
 
 
+#: How many predicted movements are worth showing. The forward model touches every axis;
+#: only the ones that actually move tell the athlete anything.
+MAX_EXPECTED_OUTCOMES = 5
+
+#: Below this, a predicted movement is engine noise rather than a claim worth publishing.
+MIN_REPORTABLE_DELTA = 0.5
+
+EXPECTED_OUTCOME_HORIZON = "immediately after this session, before any recovery"
+
+#: The axes a session actually drives. Capacity moves on benchmark evidence, not on one
+#: prescribed session, so predicting a capacity delta here would overstate what the model says.
+_OUTCOME_AXES: tuple[tuple[str, str], ...] = (
+    ("fatigue_f.cns", "cns"),
+    ("fatigue_f.muscular", "muscular"),
+    ("fatigue_f.metabolic", "metabolic"),
+    ("fatigue_f.structural", "structural"),
+    ("fatigue_f.tendon", "tendon"),
+    ("fatigue_f.grip", "grip"),
+)
+
+
+def _derive_expected_outcomes(
+    state: UnifiedStateVector, candidate: SessionCandidate
+) -> list[ExpectedOutcome]:
+    """Run the engine's own forward model one step and report what it predicts.
+
+    This is the same path MPC rolls out with - ``candidate_to_log`` ->
+    ``calculate_stress_dose`` -> ``update_athlete_state`` - so the forecast the athlete sees
+    is the forecast the planner would reason about, not a display-only approximation.
+
+    Best-effort: a forecast is an explanation, never a reason to fail a prescription. If the
+    forward model raises, the session is still returned with no expected outcomes rather
+    than a fabricated one.
+    """
+    from app.logic.dose_engine_v0 import calculate_stress_dose
+    from app.logic.mpc.candidate_dose import candidate_to_log
+    from app.logic.state_update_v0 import update_athlete_state
+
+    try:
+        log = candidate_to_log(candidate, state.timestamp)
+        predicted = update_athlete_state(state, calculate_stress_dose(log), timedelta(0), log)
+    except Exception:
+        logger.warning("expected-outcome forecast failed; omitting it", exc_info=True)
+        return []
+
+    out: list[ExpectedOutcome] = []
+    for axis, key in _OUTCOME_AXES:
+        before = float(getattr(state.fatigue_f, key))
+        after = float(getattr(predicted.fatigue_f, key))
+        if abs(after - before) < MIN_REPORTABLE_DELTA:
+            continue
+        out.append(
+            ExpectedOutcome(
+                axis=axis,
+                current=round(before, 3),
+                predicted=round(after, 3),
+                delta=round(after - before, 3),
+            )
+        )
+    out.sort(key=lambda o: (-abs(o.delta), o.axis))
+    return out[:MAX_EXPECTED_OUTCOMES]
+
+
 def finalize_prescription(
     rx: WorkoutPrescription,
     state: UnifiedStateVector | None,
     goal: TrainingGoal,
     branch_id: str,
     recent_sessions: list[dict[str, Any]] | None = None,
+    session_candidate: SessionCandidate | None = None,
 ) -> WorkoutPrescription:
     """
     Enrich prescription with `why`. If state is None (no athlete row), minimal explanation only.
     Hard constraint violations replace with a safe recovery session.
     Universal safety rules always run via SessionValidator; template-specific rules follow.
+
+    ``session_candidate`` is the real ``SessionCandidate`` the prescriber chose, and is what
+    the forward model needs to forecast this session's effect. It is optional and defaults
+    to None so existing callers keep working: without it the prescription is returned with
+    no ``expected_outcomes`` rather than a guessed one. Note this is NOT the local
+    ``candidate`` below - that is ``encode_session_candidate``'s constraint/scoring dict,
+    which has no ``domain`` and cannot drive the dose model.
     """
     if state is None:
         out = rx.model_copy(deep=True)
@@ -358,6 +435,12 @@ def finalize_prescription(
         confidence=_derive_confidence(state),
         measurement_recommendations=_derive_measurement_recommendations(state, goal),
         plan_revision_triggers=_derive_plan_revision_triggers(state),
+        expected_outcomes=(
+            _derive_expected_outcomes(state, session_candidate)
+            if session_candidate is not None
+            else []
+        ),
+        expected_outcome_horizon=EXPECTED_OUTCOME_HORIZON,
         goal_alignment=str(goal),
         constraints_applied=applied,
         source_alignment=sources[:14],
