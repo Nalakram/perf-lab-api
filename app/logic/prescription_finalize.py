@@ -27,6 +27,7 @@ from app.logic.registries import (
     primitive_names,
 )
 from app.schemas.prescription import (
+    PRESCRIPTION_ENGINE_VERSION,
     ExpectedOutcome,
     MeasurementRecommendation,
     PlanRevisionTrigger,
@@ -368,6 +369,10 @@ def finalize_prescription(
             score=None,
             structured_template_name=None,
         )
+        # Assigned, not left to the schema default: a hard-constraint override replaces the
+        # prescription object entirely, and a defaulted field would silently reappear as
+        # whatever the schema happened to say rather than what this engine produced.
+        out.model_version = PRESCRIPTION_ENGINE_VERSION
         return out
 
     program_template = get_template_for_goal(goal) or get_fallback_template()
@@ -451,6 +456,8 @@ def finalize_prescription(
         score=score_val,
         structured_template_name=st_name,
     )
+
+    out_rx.model_version = PRESCRIPTION_ENGINE_VERSION
 
     if rationale_suffix and not hard_violations:
         out_rx.rationale = (out_rx.rationale + rationale_suffix).strip()

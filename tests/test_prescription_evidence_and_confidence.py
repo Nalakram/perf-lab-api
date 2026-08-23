@@ -404,3 +404,65 @@ def test_a_failing_forecast_does_not_break_the_prescription(monkeypatch) -> None
     assert rx.why is not None
     assert rx.why.expected_outcomes == []
     assert rx.type, "the prescription itself must survive"
+
+
+# ── the engine version is produced, not merely defaulted ──────────────────────
+
+
+def test_prescription_engine_version_is_assigned_not_defaulted() -> None:
+    """The published version must come from the engine, not from a schema default.
+
+    It was a bare "v0.3" literal in the Field default that nothing ever assigned, so the
+    advertised "engine version" was a constant that could not move however much the
+    prescriber changed. Assigning it means a prescription reports what produced it.
+    """
+    from app.logic.prescriber import recommend_next_session
+    from app.schemas.prescription import PRESCRIPTION_ENGINE_VERSION
+
+    rx = recommend_next_session(_state(), "powerlifting")
+
+    assert rx.model_version == PRESCRIPTION_ENGINE_VERSION
+
+
+def test_the_no_state_path_also_reports_the_engine_version() -> None:
+    """The hard-override path builds a fresh prescription object and must still stamp it."""
+    from app.schemas.prescription import (
+        PRESCRIPTION_ENGINE_VERSION,
+        ExercisePrescription,
+        WorkoutPrescription,
+    )
+
+    rx = WorkoutPrescription(
+        type="Strength", focus="Squat", rationale="r", duration_min=60,
+        exercises=[ExercisePrescription(name="Back Squat", sets=5, reps="5")],
+    )
+    out = finalize_prescription(rx, None, "powerlifting", "b")
+
+    assert out.model_version == PRESCRIPTION_ENGINE_VERSION
+
+
+def test_bumping_the_engine_version_is_flagged_as_cross_language() -> None:
+    """Records a coupling that lives nowhere else in Python.
+
+    The web contract test pins the literal value, so a bump that only changes the Python
+    constant breaks the frontend suite with no hint of why. If this fails, update
+    web/src/perflab/screens/overview/todayPrescriptionContract.test.ts and openapi.json in
+    the same change.
+    """
+    from pathlib import Path
+
+    from app.schemas.prescription import PRESCRIPTION_ENGINE_VERSION
+
+    contract = (
+        Path(__file__).resolve().parents[1]
+        / "web/src/perflab/screens/overview/todayPrescriptionContract.test.ts"
+    )
+    if not contract.exists():  # pragma: no cover - web tree not always present
+        return
+
+    assert f'model_version: "{PRESCRIPTION_ENGINE_VERSION}"' in contract.read_text(
+        encoding="utf-8"
+    ), (
+        "the web contract test pins a different model_version than the Python constant - "
+        "bump both together, plus openapi.json"
+    )

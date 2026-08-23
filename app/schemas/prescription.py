@@ -9,6 +9,19 @@ from pydantic import BaseModel, Field
 # consumers cannot drift from them (schemas/state.py imports it for the same reason).
 from app.logic.confidence_presentation import ConfidenceStatus
 
+#: Version of the prescription engine, published on every prescription.
+#:
+#: Was a bare ``"v0.3"`` literal in the Field default below and assigned by nothing, so the
+#: advertised "engine version" was a constant that could never move no matter how much the
+#: prescriber changed. Naming it gives it one place to be bumped and one place to grep.
+#:
+#: BUMPING THIS IS A CROSS-LANGUAGE CHANGE. The web contract test pins the literal at
+#: ``web/src/perflab/screens/overview/todayPrescriptionContract.test.ts`` and
+#: ``openapi.json`` carries it as the schema default, so a bump needs all three updated
+#: together. ``test_prescription_engine_version_is_assigned_not_defaulted`` pins the Python
+#: half of that coupling.
+PRESCRIPTION_ENGINE_VERSION = "v0.3"
+
 
 class ValidationSummary(BaseModel):
     """Result of validate_session checks."""
@@ -258,7 +271,9 @@ class WorkoutPrescription(BaseModel):
     focus: str
     rationale: str
     duration_min: int
-    model_version: str = Field(default="v0.3", description="Prescription engine version")
+    model_version: str = Field(
+        default=PRESCRIPTION_ENGINE_VERSION, description="Prescription engine version"
+    )
     exercises: list[ExercisePrescription] = Field(default_factory=lambda: [])
     why: PrescriptionExplanation | None = None
 
