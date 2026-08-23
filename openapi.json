@@ -3196,6 +3196,51 @@
         "title": "PatConnectRequest",
         "type": "object"
       },
+      "PlanRevisionTrigger": {
+        "description": "A concrete state change that would make this session the wrong call.\n\nEvery driver is a threshold test, so each one already implies its own falsification\ncondition: the crossing that would start it applying, or stop it. Surfacing those turns\n\"here is your session\" into \"here is your session, and here is what would change it\" -\nwithout any new modelling, because the thresholds are the same ones the prescriber used.",
+        "properties": {
+          "axis": {
+            "description": "State field this trigger watches.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "condition": {
+            "description": "The crossing that would revise the plan.",
+            "title": "Condition",
+            "type": "string"
+          },
+          "current_value": {
+            "description": "Where the axis sits today.",
+            "title": "Current Value",
+            "type": "number"
+          },
+          "currently_active": {
+            "description": "True if this driver is firing now, so the trigger describes it switching OFF.",
+            "title": "Currently Active",
+            "type": "boolean"
+          },
+          "label": {
+            "description": "The driver that would start or stop applying.",
+            "title": "Label",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The value it would have to cross.",
+            "title": "Threshold",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "label",
+          "currently_active",
+          "condition",
+          "current_value",
+          "threshold"
+        ],
+        "title": "PlanRevisionTrigger",
+        "type": "object"
+      },
       "PlannedSessionRead": {
         "properties": {
           "benchmark_key": {
@@ -3441,6 +3486,14 @@
               "$ref": "#/components/schemas/MeasurementRecommendation"
             },
             "title": "Measurement Recommendations",
+            "type": "array"
+          },
+          "plan_revision_triggers": {
+            "description": "What would change this plan: the drivers currently applying that would switch off, and the nearest ones that would switch on. Derived from the same thresholds the prescriber used, so they cannot disagree.",
+            "items": {
+              "$ref": "#/components/schemas/PlanRevisionTrigger"
+            },
+            "title": "Plan Revision Triggers",
             "type": "array"
           },
           "prescription_branch": {

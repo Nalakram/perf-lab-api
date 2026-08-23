@@ -25,6 +25,7 @@ from app.logic.registries import (
 )
 from app.schemas.prescription import (
     MeasurementRecommendation,
+    PlanRevisionTrigger,
     PrescriptionConfidence,
     PrescriptionExplanation,
     StateEvidence,
@@ -55,6 +56,10 @@ class _DriverRule:
     #: Firing predicate. Separate from ``threshold`` because one rule is two-sided:
     #: a low aerobic signal only counts when the axis is actually populated.
     fires: Callable[[float], bool]
+    #: When an axis reads as "no signal yet" rather than a real low value. Such an axis has
+    #: no meaningful crossing to report - the honest ask there is a measurement, not a
+    #: threshold watch, and measurement_recommendations already covers it.
+    unpopulated: Callable[[float], bool] | None = None
     #: Which ``capacity_confidence`` axis carries this rule's uncertainty, when one does.
     #: Declared rather than inferred from ``axis``: the rule reads the legacy scalar
     #: mirror (``c_met_aerobic``) while the variance lives under the decomposed name
@@ -85,6 +90,7 @@ _DRIVER_RULES: tuple[_DriverRule, ...] = (
     # Two-sided on purpose: 0.0 means "no aerobic signal yet", not "no aerobic capacity".
     _DriverRule("c_met_aerobic", lambda s: s.c_met_aerobic, 30.0, "below",
                 "low aerobic capacity signal", lambda v: 0.0 < v < 30.0,
+                unpopulated=lambda v: v <= 0.0,
                 confidence_axis="aerobic"),
 )
 
@@ -207,6 +213,59 @@ def _derive_measurement_recommendations(
     return out[:MAX_MEASUREMENT_RECOMMENDATIONS]
 
 
+#: Active triggers are always shown; this caps how many *approaching* ones ride along.
+MAX_INACTIVE_TRIGGERS = 3
+
+
+def _trigger_condition(rule: "_DriverRule", fires_now: bool) -> str:
+    """Phrase the crossing that would flip this driver."""
+    if rule.direction == "above":
+        return (
+            f"{rule.axis} falls back to {rule.threshold:g} or below"
+            if fires_now
+            else f"{rule.axis} rises above {rule.threshold:g}"
+        )
+    return (
+        f"{rule.axis} recovers to {rule.threshold:g} or above"
+        if fires_now
+        else f"{rule.axis} falls below {rule.threshold:g}"
+    )
+
+
+def _derive_plan_revision_triggers(state: UnifiedStateVector) -> list[PlanRevisionTrigger]:
+    """What would change this plan - every active driver, plus the nearest approaching ones.
+
+    Uses the prescriber's own thresholds, so a trigger can never contradict the reasoning
+    that produced the session. Axes that are merely unpopulated are skipped: "measure this"
+    is a recommendation, not a threshold to watch.
+    """
+    active: list[PlanRevisionTrigger] = []
+    approaching: list[tuple[float, PlanRevisionTrigger]] = []
+
+    for rule in _DRIVER_RULES:
+        value = float(rule.read(state))
+        if rule.unpopulated is not None and rule.unpopulated(value):
+            continue
+        fires_now = rule.fires(value)
+        trigger = PlanRevisionTrigger(
+            axis=rule.axis,
+            label=rule.label,
+            currently_active=fires_now,
+            condition=_trigger_condition(rule, fires_now),
+            current_value=round(value, 4),
+            threshold=rule.threshold,
+        )
+        if fires_now:
+            active.append(trigger)
+        else:
+            # Relative distance, so axes on different scales rank comparably.
+            distance = abs(value - rule.threshold) / max(abs(rule.threshold), 1.0)
+            approaching.append((distance, trigger))
+
+    approaching.sort(key=lambda pair: (pair[0], pair[1].axis))
+    return active + [t for _, t in approaching[:MAX_INACTIVE_TRIGGERS]]
+
+
 def finalize_prescription(
     rx: WorkoutPrescription,
     state: UnifiedStateVector | None,
@@ -298,6 +357,7 @@ def finalize_prescription(
         state_evidence=evidence,
         confidence=_derive_confidence(state),
         measurement_recommendations=_derive_measurement_recommendations(state, goal),
+        plan_revision_triggers=_derive_plan_revision_triggers(state),
         goal_alignment=str(goal),
         constraints_applied=applied,
         source_alignment=sources[:14],

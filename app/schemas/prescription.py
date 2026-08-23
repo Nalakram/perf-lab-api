@@ -90,6 +90,25 @@ class MeasurementRecommendation(BaseModel):
     reason: str = Field(description="Why this axis is worth measuring.")
 
 
+class PlanRevisionTrigger(BaseModel):
+    """A concrete state change that would make this session the wrong call.
+
+    Every driver is a threshold test, so each one already implies its own falsification
+    condition: the crossing that would start it applying, or stop it. Surfacing those turns
+    "here is your session" into "here is your session, and here is what would change it" -
+    without any new modelling, because the thresholds are the same ones the prescriber used.
+    """
+
+    axis: str = Field(description="State field this trigger watches.")
+    label: str = Field(description="The driver that would start or stop applying.")
+    currently_active: bool = Field(
+        description="True if this driver is firing now, so the trigger describes it switching OFF."
+    )
+    condition: str = Field(description="The crossing that would revise the plan.")
+    current_value: float = Field(description="Where the axis sits today.")
+    threshold: float = Field(description="The value it would have to cross.")
+
+
 class PrescriptionExplanation(BaseModel):
     """Why this session — state drivers, constraints, sources."""
 
@@ -107,6 +126,14 @@ class PrescriptionExplanation(BaseModel):
     confidence: "PrescriptionConfidence | None" = Field(
         default=None,
         description="Certainty of the twin state this session was built on. NULL when no state exists.",
+    )
+    plan_revision_triggers: list[PlanRevisionTrigger] = Field(
+        default_factory=lambda: [],
+        description=(
+            "What would change this plan: the drivers currently applying that would switch "
+            "off, and the nearest ones that would switch on. Derived from the same "
+            "thresholds the prescriber used, so they cannot disagree."
+        ),
     )
     measurement_recommendations: list[MeasurementRecommendation] = Field(
         default_factory=lambda: [],

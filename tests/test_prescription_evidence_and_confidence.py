@@ -16,10 +16,12 @@ from datetime import UTC, datetime
 from app.domain.vectors import CapacityConfidence
 from app.logic.confidence_presentation import POLICY_VERSION
 from app.logic.prescription_finalize import (
+    MAX_INACTIVE_TRIGGERS,
     NO_DRIVERS_LABEL,
     UNCERTAINTY_NOT_MODELLED,
     _derive_confidence,
     _derive_measurement_recommendations,
+    _derive_plan_revision_triggers,
     _derive_state_drivers,
     _derive_state_evidence,
 )
@@ -210,3 +212,79 @@ def test_an_unrecognised_goal_still_recommends_by_severity() -> None:
 
     assert [r.axis for r in recs] == ["max_strength", "hypertrophy"]
     assert all(r.material_to_goal is False for r in recs)
+
+
+# ── what would change the plan ────────────────────────────────────────────────
+
+
+def test_an_active_driver_yields_a_switch_off_trigger() -> None:
+    """A driver that is firing should say what would stop it applying."""
+    triggers = _derive_plan_revision_triggers(_state(f_nm_central=70.0))
+    active = [t for t in triggers if t.currently_active]
+
+    assert len(active) == 1
+    t = active[0]
+    assert t.axis == "f_nm_central"
+    assert t.current_value == 70.0
+    assert t.threshold == 55.0
+    assert "falls back to 55" in t.condition
+
+
+def test_the_nearest_approaching_driver_ranks_first() -> None:
+    """Among drivers not yet firing, the one closest to its threshold matters most."""
+    triggers = _derive_plan_revision_triggers(_state(tissue_t={"knee": 53.0}))
+    inactive = [t for t in triggers if not t.currently_active]
+
+    assert inactive[0].axis == "tissue_t.knee"
+    assert "rises above 55" in inactive[0].condition
+
+
+def test_an_unpopulated_axis_has_no_threshold_to_watch() -> None:
+    """c_met_aerobic == 0.0 is "no signal", so there is no meaningful crossing.
+
+    Reporting "your aerobic capacity would have to fall below 30" for an athlete who has
+    never run would be inventing a watch on a number that does not exist. The honest ask
+    there is a measurement, and measurement_recommendations already carries it.
+    """
+    triggers = _derive_plan_revision_triggers(_state(c_met_aerobic=0.0))
+
+    assert all(t.axis != "c_met_aerobic" for t in triggers)
+
+
+def test_a_populated_aerobic_axis_does_get_a_trigger() -> None:
+    """The skip above must be about being unpopulated, not about the axis itself."""
+    triggers = _derive_plan_revision_triggers(_state(c_met_aerobic=35.0))
+
+    assert any(t.axis == "c_met_aerobic" for t in triggers)
+
+
+def test_triggers_never_contradict_the_thresholds_that_produced_the_session() -> None:
+    """Same rule table as the drivers, so a trigger cannot disagree with the reasoning.
+
+    An active trigger must be on the firing side of its threshold; an inactive one must not.
+    """
+    state = _state(f_nm_central=70.0, f_met_systemic=80.0, tissue_t={"knee": 53.0})
+
+    for t in _derive_plan_revision_triggers(state):
+        beyond = t.current_value > t.threshold
+        assert t.currently_active == beyond, (
+            f"{t.axis}: active={t.currently_active} but value {t.current_value} "
+            f"vs threshold {t.threshold}"
+        )
+
+
+def test_approaching_triggers_are_capped_but_active_ones_are_never_dropped() -> None:
+    """All active drivers are shown; only the approaching list is truncated."""
+    state = _state(
+        f_nm_central=70.0,
+        f_nm_peripheral=70.0,
+        f_met_systemic=80.0,
+        tissue_t={"lumbar": 60.0, "wrist": 60.0, "knee": 60.0},
+    )
+
+    triggers = _derive_plan_revision_triggers(state)
+    active = [t for t in triggers if t.currently_active]
+    inactive = [t for t in triggers if not t.currently_active]
+
+    assert len(active) == 6, [t.axis for t in active]
+    assert len(inactive) <= MAX_INACTIVE_TRIGGERS
