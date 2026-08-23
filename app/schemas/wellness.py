@@ -38,6 +38,22 @@ class WellnessSampleIn(BaseModel):
     soreness: float | None = Field(default=None, ge=0.0, le=10.0, description="0–10, higher = worse")
     mood: float | None = Field(default=None, ge=0.0, le=10.0, description="0–10, higher = better")
     stress: float | None = Field(default=None, ge=0.0, le=10.0, description="0–10, higher = worse")
+    measured_at: datetime | None = Field(
+        default=None,
+        description=(
+            "When the reading was TAKEN (naive UTC), as distinct from the calendar `date` "
+            "and from ingestion time. Omit when unknown — it is never substituted."
+        ),
+    )
+    quality: float | None = Field(
+        default=None,
+        ge=0.0,
+        le=1.0,
+        description=(
+            "0–1 confidence from the source's own reliability signals. Omit when the source "
+            "said nothing; that is not the same as asserting the reading is perfect."
+        ),
+    )
     raw: dict[str, Any] | None = Field(default=None, description="Source payload for provenance")
 
 
@@ -53,6 +69,8 @@ class WellnessSampleOut(BaseModel):
     soreness: float | None
     mood: float | None
     stress: float | None
+    measured_at: datetime | None = None
+    quality: float | None = None
     raw: dict[str, Any] | None
     created_at: datetime
 

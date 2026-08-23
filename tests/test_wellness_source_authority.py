@@ -13,6 +13,7 @@ from app.logic.wellness_source_authority import (
     MANUAL_SOURCE,
     OBJECTIVE_SIGNALS,
     SUBJECTIVE_SIGNALS,
+    SignalCandidate,
     authority_rank,
     is_device_source,
     resolve_signal_source,
@@ -61,7 +62,7 @@ def test_a_device_reported_subjective_signal_is_still_evidence() -> None:
     Inverting the ranking rather than excluding devices means a provider-derived stress
     score still counts when the athlete reported nothing.
     """
-    chosen = resolve_signal_source("stress", [("oura", 7.0, _T)])
+    chosen = resolve_signal_source("stress", [SignalCandidate("oura", 7.0, ingested_at=_T)])
 
     assert chosen == ("oura", 7.0)
 
@@ -78,7 +79,10 @@ def test_equal_authority_falls_back_to_ingestion_recency() -> None:
     """The previous behaviour, narrowed to where it is actually defensible."""
     chosen = resolve_signal_source(
         "hrv_ms",
-        [("oura", 50.0, _T), ("garmin", 62.0, _T + timedelta(hours=1))],
+        [
+            SignalCandidate("oura", 50.0, ingested_at=_T),
+            SignalCandidate("garmin", 62.0, ingested_at=_T + timedelta(hours=1)),
+        ],
     )
 
     assert chosen == ("garmin", 62.0)
@@ -94,31 +98,34 @@ def test_a_higher_authority_source_that_reported_nothing_does_not_win() -> None:
     manual check-in with no HRV must not suppress the device's HRV.
     """
     assert resolve_signal_source(
-        "hrv_ms", [("oura", None, _T), (MANUAL_SOURCE, 58.0, _T)]
+        "hrv_ms",
+        [SignalCandidate("oura", None, ingested_at=_T), SignalCandidate(MANUAL_SOURCE, 58.0, ingested_at=_T)],
     ) == (MANUAL_SOURCE, 58.0)
 
     assert resolve_signal_source(
-        "soreness", [(MANUAL_SOURCE, None, _T), ("oura", 4.0, _T)]
+        "soreness",
+        [SignalCandidate(MANUAL_SOURCE, None, ingested_at=_T), SignalCandidate("oura", 4.0, ingested_at=_T)],
     ) == ("oura", 4.0)
 
 
 def test_no_source_supplying_it_stays_missing() -> None:
     """Missing stays missing — it does not become a number."""
     assert resolve_signal_source("hrv_ms", []) is None
-    assert resolve_signal_source("hrv_ms", [("oura", None, _T)]) is None
+    assert resolve_signal_source("hrv_ms", [SignalCandidate("oura", None, ingested_at=_T)]) is None
 
 
 def test_a_legacy_row_with_no_ingest_time_does_not_raise() -> None:
     """Sorting must not compare None against a datetime."""
     chosen = resolve_signal_source(
-        "hrv_ms", [("oura", 55.0, None), ("garmin", 60.0, _T)]
+        "hrv_ms",
+        [SignalCandidate("oura", 55.0), SignalCandidate("garmin", 60.0, ingested_at=_T)],
     )
 
     assert chosen == ("garmin", 60.0)
 
 
 def test_only_legacy_rows_still_resolve() -> None:
-    chosen = resolve_signal_source("hrv_ms", [("oura", 55.0, None)])
+    chosen = resolve_signal_source("hrv_ms", [SignalCandidate("oura", 55.0)])
 
     assert chosen == ("oura", 55.0)
 
@@ -132,3 +139,116 @@ def test_every_configured_signal_is_classified() -> None:
 
     assert set(SIGNAL_CONFIG) == OBJECTIVE_SIGNALS | SUBJECTIVE_SIGNALS
     assert not (OBJECTIVE_SIGNALS & SUBJECTIVE_SIGNALS)
+
+
+# ── quality and measurement time actually decide ties ─────────────────────────
+
+
+def test_a_provider_flagged_degraded_reading_loses_to_an_unflagged_one() -> None:
+    """This is what stops `quality` being a decorative column.
+
+    Oura reports `low_battery_alert`; a night it flagged is materially less reliable than
+    one it did not flag, and both are device readings of equal authority.
+    """
+    chosen = resolve_signal_source(
+        "hrv_ms",
+        [
+            SignalCandidate("oura", 40.0, quality=0.5, ingested_at=_T + timedelta(hours=2)),
+            SignalCandidate("garmin", 66.0, ingested_at=_T),
+        ],
+    )
+
+    assert chosen == ("garmin", 66.0)
+
+
+def test_unreported_quality_is_not_treated_as_a_defect() -> None:
+    """A source saying nothing about quality must not lose to one that says 0.9.
+
+    "No problem reported" is compared as unflagged, which is a comparison — the row still
+    stores NULL, because it is not a claim the reading was perfect.
+    """
+    chosen = resolve_signal_source(
+        "hrv_ms",
+        [
+            SignalCandidate("oura", 55.0, quality=0.9, ingested_at=_T),
+            SignalCandidate("garmin", 61.0, ingested_at=_T),
+        ],
+    )
+
+    assert chosen == ("garmin", 61.0)
+
+
+def test_authority_still_outranks_quality() -> None:
+    """Precedence is strict: a flagged manual soreness still beats a pristine device one."""
+    chosen = resolve_signal_source(
+        "soreness",
+        [
+            SignalCandidate(MANUAL_SOURCE, 7.0, quality=0.5, ingested_at=_T),
+            SignalCandidate("oura", 2.0, quality=1.0, ingested_at=_T + timedelta(hours=3)),
+        ],
+    )
+
+    assert chosen == (MANUAL_SOURCE, 7.0)
+
+
+def test_measurement_time_beats_upload_time_for_recency() -> None:
+    """Between two devices, the later MEASUREMENT is the more current reading.
+
+    The later upload may just be a slower sync, which is what ingestion time was really
+    measuring before.
+    """
+    chosen = resolve_signal_source(
+        "hrv_ms",
+        [
+            SignalCandidate(
+                "oura", 50.0,
+                measured_at=_T + timedelta(hours=5),
+                ingested_at=_T,                       # measured late, uploaded early
+            ),
+            SignalCandidate(
+                "garmin", 62.0,
+                measured_at=_T,
+                ingested_at=_T + timedelta(hours=9),  # measured early, uploaded late
+            ),
+        ],
+    )
+
+    assert chosen == ("oura", 50.0)
+
+
+def test_ingestion_time_is_used_when_no_measurement_time_exists() -> None:
+    """Rows written before this feature keep working on the old signal."""
+    chosen = resolve_signal_source(
+        "hrv_ms",
+        [
+            SignalCandidate("oura", 50.0, ingested_at=_T),
+            SignalCandidate("garmin", 62.0, ingested_at=_T + timedelta(hours=1)),
+        ],
+    )
+
+    assert chosen == ("garmin", 62.0)
+
+
+def test_an_undated_row_can_still_win_on_authority() -> None:
+    """Having no timestamp must not silently demote a more authoritative source."""
+    chosen = resolve_signal_source(
+        "soreness",
+        [
+            SignalCandidate(MANUAL_SOURCE, 8.0),  # no timestamps at all
+            SignalCandidate("oura", 1.0, ingested_at=_T),
+        ],
+    )
+
+    assert chosen == (MANUAL_SOURCE, 8.0)
+
+
+def test_an_undated_row_can_still_win_on_quality() -> None:
+    chosen = resolve_signal_source(
+        "hrv_ms",
+        [
+            SignalCandidate("garmin", 70.0),                      # unflagged, undated
+            SignalCandidate("oura", 40.0, quality=0.5, ingested_at=_T),
+        ],
+    )
+
+    assert chosen == ("garmin", 70.0)

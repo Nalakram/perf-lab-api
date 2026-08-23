@@ -13,7 +13,16 @@ from datetime import date as date_cls
 from datetime import datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import Date, DateTime, Float, ForeignKey, Integer, String, UniqueConstraint
+from sqlalchemy import (
+    CheckConstraint,
+    Date,
+    DateTime,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    UniqueConstraint,
+)
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
@@ -28,6 +37,13 @@ class WellnessSample(Base):
     __table_args__ = (
         # One sample per athlete per day per source (idempotent ingestion).
         UniqueConstraint("user_id", "date", "source", name="uq_wellness_user_date_source"),
+        # Mirrors alembic a039. Declared here too so a metadata-built schema (the test
+        # fixture) enforces the same bound the migration does, rather than the constraint
+        # existing only in production.
+        CheckConstraint(
+            "quality IS NULL OR (quality >= 0.0 AND quality <= 1.0)",
+            name="ck_wellness_quality_0_1",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -47,6 +63,18 @@ class WellnessSample(Base):
     soreness: Mapped[float | None] = mapped_column(Float, nullable=True)
     mood: Mapped[float | None] = mapped_column(Float, nullable=True)
     stress: Mapped[float | None] = mapped_column(Float, nullable=True)  # 0-10, higher = worse
+
+    # When the reading was actually TAKEN, as opposed to when it reached us. `date` is a
+    # calendar day and `created_at` is ingestion, so without this a 6am HRV and a 2pm one
+    # are indistinguishable. Naive UTC, matching `created_at`. NULL means unknown — no row
+    # is backfilled from `created_at`, because that would assert an ingestion time as a
+    # measurement time.
+    measured_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+    # 0..1 confidence in this reading, from the provider's own reliability signals (Oura
+    # reports `low_battery_alert`, for instance). NULL means the source said nothing about
+    # quality, which is not the same as saying the reading is perfect.
+    quality: Mapped[float | None] = mapped_column(Float, nullable=True)
 
     # Full source payload for provenance / future signals not yet modeled.
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

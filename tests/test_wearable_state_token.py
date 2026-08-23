@@ -30,7 +30,7 @@ def test_wrong_purpose_rejected():
 
 def test_expired_rejected():
     expired = jwt.encode(
-        {"sub": "1", "purpose": "oura_oauth", "exp": datetime.now(UTC) - timedelta(minutes=1)},
+        {"sub": "1", "purpose": wearable_service._STATE_PURPOSE, "exp": datetime.now(UTC) - timedelta(minutes=1)},
         settings.SECRET_KEY,
         algorithm=settings.ALGORITHM,
     )
@@ -46,7 +46,7 @@ def test_tampered_rejected():
 
 def test_wrong_secret_rejected():
     forged = jwt.encode(
-        {"sub": "1", "purpose": "oura_oauth", "exp": datetime.now(UTC) + timedelta(minutes=5)},
+        {"sub": "1", "purpose": wearable_service._STATE_PURPOSE, "exp": datetime.now(UTC) + timedelta(minutes=5)},
         "not-the-app-secret",
         algorithm=settings.ALGORITHM,
     )
