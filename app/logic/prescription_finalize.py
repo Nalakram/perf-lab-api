@@ -1,8 +1,16 @@
 """Attach provenance, validation, explainability, and structured-template scoring."""
 
-from typing import Any
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Literal
 
+from app.domain.vectors import CapacityConfidence
 from app.logic.coaching_template_registry import get_structured_template_for_goal
+from app.logic.confidence_presentation import (
+    POLICY_VERSION,
+    ConfidenceStatus,
+    confidence_status,
+)
 from app.logic.constraint_engine import (
     SessionValidator,
     build_constraint_context,
@@ -15,36 +23,143 @@ from app.logic.registries import (
     primitive_names,
 )
 from app.schemas.prescription import (
+    PrescriptionConfidence,
     PrescriptionExplanation,
+    StateEvidence,
     ValidationSummary,
     WorkoutPrescription,
 )
 from app.schemas.state import UnifiedStateVector
 from app.schemas.training_goals import TrainingGoal
 
+NO_DRIVERS_LABEL = "state within normal twin bands for prescription"
+MAX_DRIVERS = 8
+
+
+@dataclass(frozen=True)
+class _DriverRule:
+    """One threshold test, with everything needed to explain itself.
+
+    The label and the evidence come from the same row, so the phrase a client reads and
+    the number behind it cannot drift apart — which is what happened while the drivers
+    were built by eight independent ``if`` statements that discarded their own inputs.
+    """
+
+    axis: str
+    read: Callable[[UnifiedStateVector], float]
+    threshold: float
+    direction: Literal["above", "below"]
+    label: str
+    #: Firing predicate. Separate from ``threshold`` because one rule is two-sided:
+    #: a low aerobic signal only counts when the axis is actually populated.
+    fires: Callable[[float], bool]
+    #: Which ``capacity_confidence`` axis carries this rule's uncertainty, when one does.
+    #: Declared rather than inferred from ``axis``: the rule reads the legacy scalar
+    #: mirror (``c_met_aerobic``) while the variance lives under the decomposed name
+    #: (``aerobic``), so name-matching would silently report "no uncertainty modelled"
+    #: for the one driver that actually has some.
+    confidence_axis: str | None = None
+
+
+def _above(threshold: float) -> Callable[[float], bool]:
+    return lambda v: v > threshold
+
+
+_DRIVER_RULES: tuple[_DriverRule, ...] = (
+    _DriverRule("f_nm_central", lambda s: s.f_nm_central, 55.0, "above",
+                "elevated CNS / central fatigue", _above(55.0)),
+    _DriverRule("f_nm_peripheral", lambda s: s.f_nm_peripheral, 55.0, "above",
+                "elevated peripheral / muscular fatigue", _above(55.0)),
+    _DriverRule("f_met_systemic", lambda s: s.f_met_systemic, 60.0, "above",
+                "elevated systemic metabolic fatigue", _above(60.0)),
+    _DriverRule("tissue_t.lumbar", lambda s: s.tissue_t.lumbar, 50.0, "above",
+                "lumbar tissue stress", _above(50.0)),
+    _DriverRule("tissue_t.wrist", lambda s: s.tissue_t.wrist, 50.0, "above",
+                "wrist tissue stress", _above(50.0)),
+    _DriverRule("tissue_t.knee", lambda s: s.tissue_t.knee, 55.0, "above",
+                "knee tissue stress", _above(55.0)),
+    _DriverRule("fatigue_f.tendon", lambda s: s.fatigue_f.tendon, 45.0, "above",
+                "tendon fatigue", _above(45.0)),
+    # Two-sided on purpose: 0.0 means "no aerobic signal yet", not "no aerobic capacity".
+    _DriverRule("c_met_aerobic", lambda s: s.c_met_aerobic, 30.0, "below",
+                "low aerobic capacity signal", lambda v: 0.0 < v < 30.0,
+                confidence_axis="aerobic"),
+)
+
+#: Capacity axes carry a live variance; these families do not, so their contribution to a
+#: prescription has unknown certainty. Reported explicitly rather than left to look certain.
+UNCERTAINTY_NOT_MODELLED = ["fatigue_f", "tissue_t", "skill_state"]
+
+
+def _derive_state_evidence(state: UnifiedStateVector) -> list[StateEvidence]:
+    """Every driver that fired, carrying the value and threshold that fired it."""
+    bands = _capacity_bands(state)
+    out: list[StateEvidence] = []
+    for rule in _DRIVER_RULES:
+        value = float(rule.read(state))
+        if not rule.fires(value):
+            continue
+        out.append(
+            StateEvidence(
+                axis=rule.axis,
+                label=rule.label,
+                value=round(value, 4),
+                threshold=rule.threshold,
+                direction=rule.direction,
+                # Only capacity axes have a variance model; everything else stays None,
+                # which the schema documents as unknown certainty, not high certainty.
+                confidence_status=(
+                    bands.get(rule.confidence_axis) if rule.confidence_axis else None
+                ),
+            )
+        )
+    return out[:MAX_DRIVERS]
+
 
 def _derive_state_drivers(state: UnifiedStateVector) -> list[str]:
-    """Human-readable drivers for explainability."""
-    out: list[str] = []
-    if state.f_nm_central > 55:
-        out.append("elevated CNS / central fatigue")
-    if state.f_nm_peripheral > 55:
-        out.append("elevated peripheral / muscular fatigue")
-    if state.f_met_systemic > 60:
-        out.append("elevated systemic metabolic fatigue")
-    if state.tissue_t.lumbar > 50:
-        out.append("lumbar tissue stress")
-    if state.tissue_t.wrist > 50:
-        out.append("wrist tissue stress")
-    if state.tissue_t.knee > 55:
-        out.append("knee tissue stress")
-    if state.fatigue_f.tendon > 45:
-        out.append("tendon fatigue")
-    if state.c_met_aerobic < 30 and state.c_met_aerobic > 0:
-        out.append("low aerobic capacity signal")
-    if not out:
-        out.append("state within normal twin bands for prescription")
-    return out[:8]
+    """Human-readable drivers for explainability.
+
+    Derived from the evidence list so the two can never disagree. The
+    "nothing fired" sentinel is a driver-only concept: an empty evidence list already
+    says the same thing without inventing an observation.
+    """
+    labels = [e.label for e in _derive_state_evidence(state)]
+    return labels or [NO_DRIVERS_LABEL]
+
+
+def _capacity_bands(state: UnifiedStateVector) -> dict[str, ConfidenceStatus]:
+    """Per-capacity-axis certainty from live variance, via the shared policy."""
+    return {
+        axis: confidence_status(getattr(state.capacity_confidence, axis))
+        for axis in CapacityConfidence.KEYS
+    }
+
+
+#: Weakest-first ordering for picking the axis that should most limit trust.
+_STATUS_RANK: dict[str, int] = {
+    "insufficient": 0,
+    "provisional": 1,
+    "established": 2,
+}
+
+
+def _derive_confidence(state: UnifiedStateVector) -> PrescriptionConfidence:
+    """Summarize how certain the twin is about the capacity it just prescribed against."""
+    bands = _capacity_bands(state)
+    weakest_axis: str | None = None
+    weakest_status: ConfidenceStatus | None = None
+    if bands:
+        weakest_axis = min(
+            bands, key=lambda a: (_STATUS_RANK.get(bands[a], 0), a)
+        )
+        weakest_status = bands[weakest_axis]
+    return PrescriptionConfidence(
+        policy_version=POLICY_VERSION,
+        capacity_axes=bands,
+        weakest_capacity_axis=weakest_axis,
+        weakest_capacity_status=weakest_status,
+        uncertainty_not_modelled=list(UNCERTAINTY_NOT_MODELLED),
+    )
 
 
 def finalize_prescription(
@@ -132,8 +247,11 @@ def finalize_prescription(
     tid = structured.template_id
     st_name = structured.name
 
+    evidence = _derive_state_evidence(state)
     out_rx.why = PrescriptionExplanation(
-        state_drivers=_derive_state_drivers(state),
+        state_drivers=[e.label for e in evidence] or [NO_DRIVERS_LABEL],
+        state_evidence=evidence,
+        confidence=_derive_confidence(state),
         goal_alignment=str(goal),
         constraints_applied=applied,
         source_alignment=sources[:14],

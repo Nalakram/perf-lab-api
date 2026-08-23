@@ -3307,9 +3307,84 @@
         "title": "PlannedSessionUpdateRequest",
         "type": "object"
       },
+      "PrescriptionConfidence": {
+        "description": "How certain the twin is about the state this prescription was built on.\n\nDerived from the live per-axis ``capacity_confidence`` variance via the shared\n``confidence_presentation_policy``. Reported, not yet acted on: nothing in the\nprescriber currently widens or narrows a recommendation based on these bands.",
+        "properties": {
+          "capacity_axes": {
+            "additionalProperties": {
+              "enum": [
+                "established",
+                "provisional",
+                "insufficient"
+              ],
+              "type": "string"
+            },
+            "description": "Per-capacity-axis certainty band derived from live variance.",
+            "title": "Capacity Axes",
+            "type": "object"
+          },
+          "policy_version": {
+            "description": "Confidence-presentation policy that produced the bands.",
+            "title": "Policy Version",
+            "type": "string"
+          },
+          "uncertainty_not_modelled": {
+            "description": "State families the engine keeps NO uncertainty for. Their contribution to this prescription has unknown certainty; the absence is reported rather than being allowed to read as confidence.",
+            "items": {
+              "type": "string"
+            },
+            "title": "Uncertainty Not Modelled",
+            "type": "array"
+          },
+          "weakest_capacity_axis": {
+            "anyOf": [
+              {
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "The least certain capacity axis \u2014 the one that should most constrain trust.",
+            "title": "Weakest Capacity Axis"
+          },
+          "weakest_capacity_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Weakest Capacity Status"
+          }
+        },
+        "required": [
+          "policy_version"
+        ],
+        "title": "PrescriptionConfidence",
+        "type": "object"
+      },
       "PrescriptionExplanation": {
         "description": "Why this session \u2014 state drivers, constraints, sources.",
         "properties": {
+          "confidence": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/PrescriptionConfidence"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty of the twin state this session was built on. NULL when no state exists."
+          },
           "constraints_applied": {
             "items": {
               "type": "string"
@@ -3359,6 +3434,14 @@
               "type": "string"
             },
             "title": "State Drivers",
+            "type": "array"
+          },
+          "state_evidence": {
+            "description": "The numbers behind ``state_drivers``, one entry per driver that fired. Empty when no driver fired, or when there is no athlete state yet.",
+            "items": {
+              "$ref": "#/components/schemas/StateEvidence"
+            },
+            "title": "State Evidence",
             "type": "array"
           },
           "structured_template_name": {
@@ -4616,6 +4699,66 @@
           }
         },
         "title": "SignalSummary",
+        "type": "object"
+      },
+      "StateEvidence": {
+        "description": "The measurement behind one state driver, not just the phrase it produced.\n\n``state_drivers`` collapses a threshold test to a string (\"elevated CNS / central\nfatigue\"), discarding the number that fired it \u2014 so a client can read *what* the\nsystem concluded but never *what it saw*. Each entry here is the same test with its\nevidence intact, emitted from the same rule table, so the label and the number cannot\ndisagree.",
+        "properties": {
+          "axis": {
+            "description": "State field the test read, e.g. 'f_nm_central'.",
+            "title": "Axis",
+            "type": "string"
+          },
+          "confidence_status": {
+            "anyOf": [
+              {
+                "enum": [
+                  "established",
+                  "provisional",
+                  "insufficient"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Certainty band for this axis, when the axis has a variance model. NULL means the engine models no uncertainty for it at all (fatigue, tissue and skill carry no variance) \u2014 that is UNKNOWN certainty, not high certainty.",
+            "title": "Confidence Status"
+          },
+          "direction": {
+            "description": "Whether firing means the value sat above or below the threshold.",
+            "enum": [
+              "above",
+              "below"
+            ],
+            "title": "Direction",
+            "type": "string"
+          },
+          "label": {
+            "description": "The human-readable driver this produced.",
+            "title": "Label",
+            "type": "string"
+          },
+          "threshold": {
+            "description": "The threshold it was compared against.",
+            "title": "Threshold",
+            "type": "number"
+          },
+          "value": {
+            "description": "The observed value on that axis.",
+            "title": "Value",
+            "type": "number"
+          }
+        },
+        "required": [
+          "axis",
+          "label",
+          "value",
+          "threshold",
+          "direction"
+        ],
+        "title": "StateEvidence",
         "type": "object"
       },
       "StateHistorySnapshotRead": {
