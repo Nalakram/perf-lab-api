@@ -187,3 +187,64 @@ async def test_the_baseline_window_still_excludes_today(async_db) -> None:
     )
 
     assert per_source["hrv_ms"] == 70.0
+
+
+# ── freshness and quality reach the resolver from real rows ───────────────────
+
+
+async def test_a_battery_flagged_device_reading_loses_to_an_unflagged_one(async_db) -> None:
+    """End-to-end proof `quality` is not a decorative column.
+
+    Oura reports `low_battery_alert`, which the adapter maps to a reduced quality. Two
+    device rows of equal authority: the flagged one must lose.
+    """
+    user = await _user(async_db, "ws-quality@test.com")
+    uid = user.id
+    await _sample(
+        async_db, uid, _TODAY, "oura", hrv_ms=40.0, quality=0.5,
+        ingested=datetime(2026, 8, 23, 23, 0, tzinfo=UTC),
+    )
+    await _sample(async_db, uid, _TODAY, "garmin", hrv_ms=66.0)
+
+    values, sources = await _resolve_day(async_db, uid, _TODAY)
+
+    assert values["hrv_ms"] == 66.0
+    assert sources["hrv_ms"] == "garmin"
+
+
+async def test_measurement_time_beats_upload_time_from_real_rows(async_db) -> None:
+    """`measured_at` is read, not merely stored."""
+    user = await _user(async_db, "ws-measured@test.com")
+    uid = user.id
+    await _sample(
+        async_db, uid, _TODAY, "oura", hrv_ms=50.0,
+        measured_at=datetime(2026, 8, 23, 11, 0),   # measured late
+        ingested=datetime(2026, 8, 23, 6, 0, tzinfo=UTC),   # uploaded early
+    )
+    await _sample(
+        async_db, uid, _TODAY, "garmin", hrv_ms=62.0,
+        measured_at=datetime(2026, 8, 23, 5, 0),    # measured early
+        ingested=datetime(2026, 8, 23, 21, 0, tzinfo=UTC),  # uploaded late
+    )
+
+    values, sources = await _resolve_day(async_db, uid, _TODAY)
+
+    assert values["hrv_ms"] == 50.0
+    assert sources["hrv_ms"] == "oura"
+
+
+async def test_rows_without_the_new_columns_still_resolve(async_db) -> None:
+    """Every pre-migration row has NULL measured_at and quality; nothing may regress."""
+    user = await _user(async_db, "ws-legacy@test.com")
+    uid = user.id
+    await _sample(async_db, uid, _TODAY, "oura", hrv_ms=70.0)
+    await _sample(
+        async_db, uid, _TODAY, "manual", soreness=5.0,
+        ingested=datetime(2026, 8, 23, 20, 0, tzinfo=UTC),
+    )
+
+    values, sources = await _resolve_day(async_db, uid, _TODAY)
+
+    assert values["hrv_ms"] == 70.0
+    assert values["soreness"] == 5.0
+    assert sources["soreness"] == "manual"

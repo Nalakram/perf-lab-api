@@ -64,7 +64,13 @@ def test_registry_covers_the_known_wellness_metrics():
     """Guards the other direction: a NEW wellness column added to the model without a
     registry entry is invisible to coverage. Non-signal columns are excluded explicitly,
     so adding one forces a deliberate choice here rather than a silent omission."""
-    non_signal = {"id", "user_id", "date", "source", "raw", "created_at"}
+    # Per-row provenance/metadata, deliberately not coverage signals: they describe HOW a
+    # reading was obtained, not WHAT was measured. Counting them as signals would inflate
+    # an athlete's coverage without them having reported anything more.
+    non_signal = {
+        "id", "user_id", "date", "source", "raw", "created_at",
+        "measured_at", "quality",
+    }
     unregistered = _wellness_sample_columns() - non_signal - {
         metric for sig in WELLNESS_SIGNAL_REGISTRY.values() for metric in sig.metrics
     }

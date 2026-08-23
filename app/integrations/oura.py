@@ -181,6 +181,44 @@ def _sleep_seconds(doc: dict[str, Any]) -> float:
     return float(val) if isinstance(val, (int, float)) else 0.0
 
 
+#: Confidence assigned when Oura flags `low_battery_alert` on a sleep document.
+#: A battery-degraded night still measured something, so it is downweighted rather than
+#: discarded. The exact figure is a starting judgement, not a calibrated one — it says
+#: "trust this materially less", and wants revisiting against real error data.
+LOW_BATTERY_QUALITY = 0.5
+
+
+def _measured_at(doc: dict[str, Any]) -> datetime | None:
+    """When the sleep period ended — the close of the HRV / resting-HR measurement window.
+
+    Oura's documented sleep document carries `bedtime_end` as an ISO 8601 timestamp with an
+    offset. Stored as naive UTC to match the column convention here. Unparseable or absent
+    means unknown, never a substituted value: `created_at` is ingestion time and asserting
+    it as a measurement time would be exactly the kind of invented number this codebase is
+    removing.
+    """
+    raw = doc.get("bedtime_end")
+    if not isinstance(raw, str) or not raw.strip():
+        return None
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return parsed
+    return parsed.astimezone(UTC).replace(tzinfo=None)
+
+
+def _quality(doc: dict[str, Any]) -> float | None:
+    """Provider-reported reliability for this reading, or None if it said nothing.
+
+    Deliberately does NOT return 1.0 when no alert is present: the absence of a flagged
+    problem is not a claim of a perfect measurement, and emitting 1.0 would turn silence
+    into certainty.
+    """
+    return LOW_BATTERY_QUALITY if doc.get("low_battery_alert") is True else None
+
+
 def _sleep_doc_to_wellness(
     day: str, doc: dict[str, Any], readiness: dict[str, Any] | None
 ) -> NormalizedWellness:
@@ -212,5 +250,7 @@ def _sleep_doc_to_wellness(
         resting_hr=float(lowest_hr) if isinstance(lowest_hr, (int, float)) else None,
         soreness=None,  # Oura does not measure soreness
         mood=None,  # Oura does not measure mood
+        measured_at=_measured_at(doc),
+        quality=_quality(doc),
         raw=raw,
     )

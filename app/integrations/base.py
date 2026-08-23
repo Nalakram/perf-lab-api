@@ -44,6 +44,17 @@ class NormalizedWellness:
     resting_hr: float | None = None
     soreness: float | None = None  # 0–10, higher = worse
     mood: float | None = None  # 0–10, higher = better
+
+    #: When the measurement window actually closed, if the provider reports it. Distinct
+    #: from ``day`` (a calendar date) and from ingestion time. Naive UTC. ``None`` means the
+    #: provider did not say — never a substitute value.
+    measured_at: datetime | None = None
+
+    #: 0..1 confidence from the provider's own reliability signals. ``None`` means the
+    #: provider said nothing about quality, which is NOT the same as asserting it is
+    #: perfect — so no adapter should emit 1.0 merely because no problem was flagged.
+    quality: float | None = None
+
     raw: dict[str, Any] = field(default_factory=_empty_raw)
 
 

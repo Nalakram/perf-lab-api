@@ -5910,6 +5910,19 @@
             "description": "rMSSD-style HRV (ms)",
             "title": "Hrv Ms"
           },
+          "measured_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "When the reading was TAKEN (naive UTC), as distinct from the calendar `date` and from ingestion time. Omit when unknown \u2014 it is never substituted.",
+            "title": "Measured At"
+          },
           "mood": {
             "anyOf": [
               {
@@ -5923,6 +5936,20 @@
             ],
             "description": "0\u201310, higher = better",
             "title": "Mood"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "maximum": 1.0,
+                "minimum": 0.0,
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "0\u20131 confidence from the source's own reliability signals. Omit when the source said nothing; that is not the same as asserting the reading is perfect.",
+            "title": "Quality"
           },
           "raw": {
             "anyOf": [
@@ -6045,6 +6072,18 @@
             "title": "Id",
             "type": "integer"
           },
+          "measured_at": {
+            "anyOf": [
+              {
+                "format": "date-time",
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Measured At"
+          },
           "mood": {
             "anyOf": [
               {
@@ -6055,6 +6094,17 @@
               }
             ],
             "title": "Mood"
+          },
+          "quality": {
+            "anyOf": [
+              {
+                "type": "number"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Quality"
           },
           "raw": {
             "anyOf": [

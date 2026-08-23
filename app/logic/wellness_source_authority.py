@@ -28,6 +28,8 @@ conflating the two would import a rejection rule written for a different questio
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from datetime import datetime
 from typing import Any
 
 #: Signals only a human can report. A device that emits these is inferring, not measuring.
@@ -67,25 +69,65 @@ def authority_rank(signal: str, source: str) -> int:
     return _PREFERRED if device else _ACCEPTED
 
 
+#: Ordering stand-in for a reading whose source reported no quality at all. Between a
+#: reading the provider FLAGGED as degraded and one it did not, prefer the unflagged — that
+#: is a comparison, not a claim. Nothing stores this value; `quality` stays NULL on the row,
+#: because "no problem reported" is not the same as "measured perfectly".
+_UNFLAGGED_ORDERING_QUALITY = 1.0
+
+
+@dataclass(frozen=True)
+class SignalCandidate:
+    """One source's offer for one signal on one day."""
+
+    source: str
+    value: Any
+    quality: float | None = None
+    #: When the reading was taken, if the provider said. Preferred over ingestion time:
+    #: between two devices, the later MEASUREMENT is the more current reading, whereas the
+    #: later upload may just be a slower sync.
+    measured_at: datetime | None = None
+    #: When the row reached us. The fallback ordering signal, and all a legacy row has.
+    ingested_at: datetime | None = None
+
+
 def resolve_signal_source(
-    signal: str, candidates: list[tuple[str, Any, Any]]
+    signal: str, candidates: list[SignalCandidate]
 ) -> tuple[str, Any] | None:
     """Pick the source to believe for one signal from same-day candidates.
 
-    ``candidates`` is ``(source, value, ingested_at)``; entries whose value is ``None`` are
-    not candidates at all, because a source that reported nothing for a signal must not
-    outrank one that did simply by being more authoritative in general.
+    Entries whose value is ``None`` are not candidates at all: a source that reported
+    nothing for a signal must not outrank one that did simply by being more authoritative
+    in general.
+
+    Ordering, in strict precedence: authority for this signal, then provider-reported
+    quality, then recency — measurement time where known, ingestion time otherwise.
 
     Returns ``(source, value)``, or ``None`` when no source supplied this signal — which
     stays missing rather than becoming a number.
     """
-    supplied = [(src, val, at) for src, val, at in candidates if val is not None]
+    supplied = [c for c in candidates if c.value is not None]
     if not supplied:
         return None
-    # Highest authority first, then most recently ingested. `ingested_at` may be None on a
-    # legacy row; sort those last rather than raising on a None comparison.
-    best = max(
-        supplied,
-        key=lambda c: (authority_rank(signal, c[0]), c[2] is not None, c[2] or 0),
-    )
-    return best[0], best[1]
+
+    def _key(c: SignalCandidate) -> tuple[int, float, bool, Any]:
+        recency = c.measured_at or c.ingested_at
+        return (
+            authority_rank(signal, c.source),
+            c.quality if c.quality is not None else _UNFLAGGED_ORDERING_QUALITY,
+            # A row with no timestamp at all sorts last rather than raising on a None
+            # comparison; the flag keeps datetimes from being compared against a filler.
+            recency is not None,
+            recency,
+        )
+
+    dated = [c for c in supplied if (c.measured_at or c.ingested_at) is not None]
+    undated = [c for c in supplied if (c.measured_at or c.ingested_at) is None]
+    best = max(dated, key=_key) if dated else max(undated, key=_key)
+    if dated and undated:
+        # Compare the winners on the first two components only; an undated row can still
+        # win on authority or quality, it just cannot win a recency tie-break.
+        best_undated = max(undated, key=_key)
+        if _key(best_undated)[:2] > _key(best)[:2]:
+            best = best_undated
+    return best.source, best.value

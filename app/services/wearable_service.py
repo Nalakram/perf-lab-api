@@ -1,4 +1,4 @@
-"""Wearable-sync orchestration (Phase 2 — Oura OAuth + PAT).
+"""Wearable-sync orchestration — provider-independent (OAuth + PAT).
 
 Ties the provider adapter, the encrypted token store (``WearableConnection``), and
 the wellness sink together:
@@ -9,7 +9,7 @@ the wellness sink together:
 - PAT: ``connect_pat`` validates a Personal Access Token and stores it.
 - Sync: ``sync_connection`` refreshes the OAuth token as needed, pulls new days, and
   upserts them via the canonical ``readiness_service.upsert_wellness_sample`` sink
-  (source="oura"), advancing ``last_sync_at``. ``sync_all`` drives every connection
+  (source = the connection's own provider slug), advancing ``last_sync_at``. ``sync_all`` drives every connection
   (used by the nightly cron job).
 
 Tokens are Fernet-encrypted at rest (``app.core.crypto``); this module is the only
@@ -28,7 +28,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.core import crypto
 from app.core.config import settings
 from app.integrations.base import TokenBundle, WearableAdapter
-from app.integrations.oura import OuraAdapter
+from app.integrations.registry import adapter_for
 from app.models.wearable_connection import WearableConnection
 from app.schemas.wellness import WellnessSampleIn
 from app.services import readiness_service
@@ -38,7 +38,11 @@ logger = logging.getLogger("perflab.wearable")
 # OAuth ``state`` token: a short-lived signed JWT carrying the user id through the
 # browser redirect. Reuses the app's JWT secret; a distinct purpose claim prevents
 # it from being confused with an access token.
-_STATE_PURPOSE = "oura_oauth"
+# Provider-neutral: a Garmin consent flow signing a token whose purpose claims "oura_oauth"
+# would be a small lie of exactly the kind this module is being cleaned of. Changing the value
+# invalidates state tokens already in flight, which is bounded by the 10-minute TTL below —
+# an athlete mid-consent at deploy time sees an error and reconnects.
+_STATE_PURPOSE = "wearable_oauth"
 _STATE_TTL = timedelta(minutes=10)
 
 # Refresh an OAuth access token when it is within this window of expiring.
@@ -47,11 +51,20 @@ _REFRESH_BUFFER = timedelta(minutes=5)
 # How many trailing days a first sync (no watermark) pulls.
 DEFAULT_SYNC_DAYS = 7
 
+#: The provider assumed when a caller does not name one. Still Oura because it is the only
+#: registered integration; every signature below keeps taking an explicit provider, so this
+#: is a convenience default rather than an assumption baked into the logic.
+DEFAULT_PROVIDER = "oura"
 
-def _adapter(provider: str = "oura") -> WearableAdapter:
-    if provider == "oura":
-        return OuraAdapter()
-    raise ValueError(f"Unsupported wearable provider: {provider!r}")
+
+def _adapter(provider: str = DEFAULT_PROVIDER) -> WearableAdapter:
+    """Resolve a provider slug through the registry.
+
+    Was an ``if provider == "oura"`` ladder plus a direct ``OuraAdapter`` import, which made
+    this shared service a place every new integration had to edit — and falsified
+    ``integrations/base.py``'s claim that the sync service never imports a concrete provider.
+    """
+    return adapter_for(provider)
 
 
 # --- OAuth state token (pure; unit-tested directly) ------------------------------
@@ -66,7 +79,7 @@ def sign_state(user_id: int) -> str:
     return jwt.encode(payload, settings.SECRET_KEY, algorithm=settings.ALGORITHM)
 
 
-def get_authorize_url(user_id: int, provider: str = "oura") -> str:
+def get_authorize_url(user_id: int, provider: str = DEFAULT_PROVIDER) -> str:
     """Build the provider's OAuth authorize URL with a signed state for ``user_id``."""
     return _adapter(provider).build_authorize_url(sign_state(user_id))
 
@@ -89,7 +102,7 @@ def verify_state(token: str) -> int:
 
 
 async def get_connection(
-    db: AsyncSession, user_id: int, provider: str = "oura"
+    db: AsyncSession, user_id: int, provider: str = DEFAULT_PROVIDER
 ) -> WearableConnection | None:
     return (
         await db.execute(
@@ -127,7 +140,7 @@ async def _store_connection(
 
 
 async def handle_oauth_callback(
-    db: AsyncSession, code: str, state: str, provider: str = "oura"
+    db: AsyncSession, code: str, state: str, provider: str = DEFAULT_PROVIDER
 ) -> WearableConnection:
     user_id = verify_state(state)
     tokens = await _adapter(provider).exchange_code(code)
@@ -137,7 +150,7 @@ async def handle_oauth_callback(
 
 
 async def connect_pat(
-    db: AsyncSession, user_id: int, token: str, provider: str = "oura"
+    db: AsyncSession, user_id: int, token: str, provider: str = DEFAULT_PROVIDER
 ) -> WearableConnection:
     """Validate a Personal Access Token with a live probe, then store it."""
     adapter = _adapter(provider)
@@ -153,7 +166,7 @@ async def connect_pat(
     )
 
 
-async def disconnect(db: AsyncSession, user_id: int, provider: str = "oura") -> bool:
+async def disconnect(db: AsyncSession, user_id: int, provider: str = DEFAULT_PROVIDER) -> bool:
     conn = await get_connection(db, user_id, provider)
     if conn is None:
         return False
@@ -217,6 +230,10 @@ async def sync_connection(
             resting_hr=r.resting_hr,
             soreness=r.soreness,
             mood=r.mood,
+            # Freshness and provider-reported reliability, when the adapter supplies them.
+            # Both stay None otherwise rather than being defaulted.
+            measured_at=r.measured_at,
+            quality=r.quality,
             raw=r.raw or None,
         )
         await readiness_service.upsert_wellness_sample(db, conn.user_id, payload)
@@ -228,7 +245,7 @@ async def sync_connection(
 
 
 async def sync_user(
-    db: AsyncSession, user_id: int, *, provider: str = "oura", days: int = DEFAULT_SYNC_DAYS
+    db: AsyncSession, user_id: int, *, provider: str = DEFAULT_PROVIDER, days: int = DEFAULT_SYNC_DAYS
 ) -> int:
     conn = await get_connection(db, user_id, provider)
     if conn is None:

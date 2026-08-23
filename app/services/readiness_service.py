@@ -31,7 +31,7 @@ from app.logic.wellness_registry import (
     signal_from_metric,
 )
 from app.logic.wellness_signals import SIGNAL_CONFIG as _SIGNAL_CONFIG
-from app.logic.wellness_source_authority import resolve_signal_source
+from app.logic.wellness_source_authority import SignalCandidate, resolve_signal_source
 from app.logic.wellness_tracking import get_expected_tracked_signals
 from app.models.user import AthleteProfile
 from app.models.wellness import WellnessSample
@@ -308,7 +308,17 @@ async def _resolve_day(
     source_by_signal: dict[str, str] = {}
     for sig in _SIGNALS:
         chosen = resolve_signal_source(
-            sig, [(r.source, getattr(r, sig), r.created_at) for r in rows]
+            sig,
+            [
+                SignalCandidate(
+                    source=r.source,
+                    value=getattr(r, sig),
+                    quality=r.quality,
+                    measured_at=r.measured_at,
+                    ingested_at=r.created_at,
+                )
+                for r in rows
+            ],
         )
         if chosen is None:
             values[sig] = None  # nobody reported it; it stays missing

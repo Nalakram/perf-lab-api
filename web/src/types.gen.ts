@@ -3366,10 +3366,20 @@ export interface components {
              */
             hrv_ms?: number | null;
             /**
+             * Measured At
+             * @description When the reading was TAKEN (naive UTC), as distinct from the calendar `date` and from ingestion time. Omit when unknown — it is never substituted.
+             */
+            measured_at?: string | null;
+            /**
              * Mood
              * @description 0–10, higher = better
              */
             mood?: number | null;
+            /**
+             * Quality
+             * @description 0–1 confidence from the source's own reliability signals. Omit when the source said nothing; that is not the same as asserting the reading is perfect.
+             */
+            quality?: number | null;
             /**
              * Raw
              * @description Source payload for provenance
@@ -3416,8 +3426,12 @@ export interface components {
             hrv_ms: number | null;
             /** Id */
             id: number;
+            /** Measured At */
+            measured_at?: string | null;
             /** Mood */
             mood: number | null;
+            /** Quality */
+            quality?: number | null;
             /** Raw */
             raw: {
                 [key: string]: unknown;
