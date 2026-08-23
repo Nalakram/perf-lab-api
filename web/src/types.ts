@@ -48,6 +48,13 @@ export type ValidationSummary = Schemas["ValidationSummary"];
 export type PrescriptionExplanation = Schemas["PrescriptionExplanation"];
 export type ExercisePrescription = Schemas["ExercisePrescription"];
 export type WorkoutPrescription = Schemas["WorkoutPrescription"];
+/* The structured explanation contract that `PrescriptionExplanation` carries. */
+export type StateEvidence = Schemas["StateEvidence"];
+export type PrescriptionConfidence = Schemas["PrescriptionConfidence"];
+export type MeasurementRecommendation = Schemas["MeasurementRecommendation"];
+export type PlanRevisionTrigger = Schemas["PlanRevisionTrigger"];
+export type ExpectedOutcome = Schemas["ExpectedOutcome"];
+export type ConservatismSummary = Schemas["ConservatismSummary"];
 
 /* ---------- Onboarding ---------- */
 export type OnboardRequest = Schemas["OnboardRequest"];

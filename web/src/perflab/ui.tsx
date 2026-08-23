@@ -195,6 +195,42 @@ export function ScreenHeader({
   );
 }
 
+// Canonical weak-point tags are coarse snake_case slugs (`hip_hinge`, `squat_pattern`)
+// defined in app/models/weak_point.py. Humanised rather than mapped to a label table:
+// the vocabulary is owned by the backend, and a tag added there must not render as a
+// raw slug here just because this file was not edited in the same change.
+const weakPointLabel = (tag: string): string => {
+  const words = tag.replace(/_/g, " ").trim();
+  return words.charAt(0).toUpperCase() + words.slice(1);
+};
+
+/**
+ * The athlete's own flagged deficits that a prescribed exercise addresses.
+ *
+ * Populated by the prescriber as (this exercise's catalog tags ∩ the athlete's ACTIVE
+ * weak points), so an empty list is the ordinary case — it means this lift is in the
+ * session for some other reason, not that the athlete has no weak points. Renders
+ * nothing at all then, rather than an empty-state row that would imply otherwise.
+ */
+export function WeakPointTags({ tags, className }: { tags: string[]; className?: string }) {
+  if (tags.length === 0) return null;
+  return (
+    <div className={cn("flex flex-wrap items-center gap-[5px]", className)}>
+      <span className="font-mono text-[9.5px] font-semibold uppercase leading-none tracking-[0.1em] text-faint">
+        addresses
+      </span>
+      {tags.map((tag) => (
+        <span
+          key={tag}
+          className="rounded-[5px] border border-ac/25 bg-ac/[0.10] px-[6px] py-[3px] text-[10.5px] font-semibold leading-none text-ac"
+        >
+          {weakPointLabel(tag)}
+        </span>
+      ))}
+    </div>
+  );
+}
+
 /** Pulsing "synced" status chip. */
 export function SyncChip({ label }: { label: string }) {
   return (

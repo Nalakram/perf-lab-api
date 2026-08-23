@@ -206,29 +206,90 @@ describe("trendSection", () => {
 
 // ---- Morning wellness ------------------------------------------------------------------
 
+/** Readiness carrying the engine's own per-signal resolution for `date`. */
+function resolvedReadiness(
+  date: string,
+  components: Array<{ signal: string; value: number }>,
+): AuthedResource<ReadinessScore> {
+  return ok({
+    score: 71,
+    components: components.map((c) => ({ ...c, baseline: c.value, contribution: 0 })),
+    wellness_sample: wellness({ date }),
+  } as unknown as ReadinessScore);
+}
+
+const noReadiness = <T,>() => guest<T>();
+
 describe("morningSection", () => {
   it("renders every metric empty when the athlete has logged nothing", () => {
-    const view = morningSection(ok([]));
+    const view = morningSection(ok([]), noReadiness<ReadinessScore>());
     expect(view.metrics).toHaveLength(4);
     view.metrics.forEach((m) => expect(m.value).toEqual({ kind: "empty", reason: "no_data" }));
     expect(view.lastLoggedDate).toEqual({ kind: "empty", reason: "no_data" });
   });
 
   it("resolves each field independently — a partial row is partly empty, not borrowed", () => {
-    const view = morningSection(ok([wellness({ hrv_ms: 71, resting_hr: null })]));
+    const view = morningSection(
+      ok([wellness({ hrv_ms: 71, resting_hr: null })]),
+      noReadiness<ReadinessScore>(),
+    );
     const byKey = Object.fromEntries(view.metrics.map((m) => [m.key, m.value]));
     expect(byKey.hrv).toEqual({ kind: "value", value: "71 ms" });
     expect(byKey.resting_hr).toEqual({ kind: "empty", reason: "not_recorded" });
   });
 
   it("reports the sample's own date and makes no claim about 'today' (#191)", () => {
-    const view = morningSection(ok([wellness({ date: "2026-07-18" })]));
+    const view = morningSection(ok([wellness({ date: "2026-07-18" })]), noReadiness<ReadinessScore>());
     expect(view.lastLoggedDate).toEqual({ kind: "value", value: "2026-07-18" });
   });
 
   it.each(NON_SUCCESS)("yields no metric values when the resource is %s", (_label, build) => {
-    const view = morningSection(build<WellnessSampleOut[]>());
+    const view = morningSection(build<WellnessSampleOut[]>(), noReadiness<ReadinessScore>());
     view.metrics.forEach((m) => expect(isValue(m.value)).toBe(false));
+  });
+
+  // ---- Multi-source days -------------------------------------------------------
+  // `WellnessSample` is keyed (user, date, source). Reading one row dropped whichever
+  // source landed first; these are the regressions that proved it.
+
+  it("keeps a signal only the OTHER source reported — the athlete's soreness is not dropped", () => {
+    // Device synced after the check-in, so it sorts first and carries no soreness.
+    const device = wellness({ id: 2, source: "oura", soreness: null, created_at: "2026-07-20T07:00:00Z" });
+    const manual = wellness({ id: 1, source: "manual", soreness: 6, hrv_ms: null, created_at: "2026-07-20T06:00:00Z" });
+    const view = morningSection(ok([device, manual]), noReadiness<ReadinessScore>());
+    const byKey = Object.fromEntries(view.metrics.map((m) => [m.key, m.value]));
+    expect(byKey.soreness).toEqual({ kind: "value", value: "Moderate" });
+    expect(byKey.hrv).toEqual({ kind: "value", value: "71 ms" });
+  });
+
+  it("shows the value the engine used when two sources report the same signal", () => {
+    const device = wellness({ id: 2, source: "oura", hrv_ms: 71, created_at: "2026-07-20T07:00:00Z" });
+    const manual = wellness({ id: 1, source: "manual", hrv_ms: 58, created_at: "2026-07-20T06:00:00Z" });
+    // The engine believed the device for HRV; the tile must not disagree with the ring.
+    const view = morningSection(
+      ok([manual, device]),
+      resolvedReadiness("2026-07-20", [{ signal: "hrv_ms", value: 71 }]),
+    );
+    const byKey = Object.fromEntries(view.metrics.map((m) => [m.key, m.value]));
+    expect(byKey.hrv).toEqual({ kind: "value", value: "71 ms" });
+  });
+
+  it("ignores the engine's resolution when it describes a different day", () => {
+    const view = morningSection(
+      ok([wellness({ date: "2026-07-20", hrv_ms: 58 })]),
+      resolvedReadiness("2026-07-19", [{ signal: "hrv_ms", value: 71 }]),
+    );
+    const byKey = Object.fromEntries(view.metrics.map((m) => [m.key, m.value]));
+    expect(byKey.hrv).toEqual({ kind: "value", value: "58 ms" });
+  });
+
+  it("folds only the latest date, never borrowing yesterday's reading", () => {
+    const today = wellness({ id: 2, date: "2026-07-20", soreness: null });
+    const yesterday = wellness({ id: 1, date: "2026-07-19", soreness: 8 });
+    const view = morningSection(ok([today, yesterday]), noReadiness<ReadinessScore>());
+    const byKey = Object.fromEntries(view.metrics.map((m) => [m.key, m.value]));
+    expect(byKey.soreness).toEqual({ kind: "empty", reason: "not_recorded" });
+    expect(view.lastLoggedDate).toEqual({ kind: "value", value: "2026-07-20" });
   });
 });
 
@@ -315,7 +376,7 @@ describe("no authenticated state produces fixture-backed athlete data", () => {
     JSON.stringify([
       readinessSection(r as AuthedResource<ReadinessScore>),
       trendSection(r as AuthedResource<StateHistorySnapshotRead[]>),
-      morningSection(r as AuthedResource<WellnessSampleOut[]>),
+      morningSection(r as AuthedResource<WellnessSampleOut[]>, r as AuthedResource<ReadinessScore>),
       twinSnapshotSection(r as AuthedResource<StateHistorySnapshotRead[]>),
       loadSection(r as AuthedResource<OverviewMetrics>),
       habitSection(r as AuthedResource<OverviewMetrics>),
@@ -330,7 +391,7 @@ describe("no authenticated state produces fixture-backed athlete data", () => {
     const json = JSON.stringify([
       readinessSection(ok(readinessScore({ score: null }))),
       trendSection(ok([])),
-      morningSection(ok([])),
+      morningSection(ok([]), ok(readinessScore({ score: null }))),
       twinSnapshotSection(ok([])),
       habitSection(ok(overviewMetrics({ adherence: { pct: null, streak_days: 0, window_days: 28 } } as Partial<OverviewMetrics>))),
     ]);

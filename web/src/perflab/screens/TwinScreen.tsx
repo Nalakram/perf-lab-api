@@ -23,7 +23,8 @@ import type { ReadinessScore, StateHistorySnapshotRead, WorkoutPrescription } fr
 import { usePerfLab } from "../store";
 import { useAuthedResource } from "../useAuthedResource";
 import { assertNever, resourceData, type AuthedResource } from "../resource";
-import { Card, MetricBar, Pill, ReadinessRing, SectionLabel, SyncChip } from "../ui";
+import { Card, MetricBar, Pill, ReadinessRing, SectionLabel, SyncChip, WeakPointTags } from "../ui";
+import { WhyThisSession } from "../prescription/WhyThisSession";
 import { Chart, Line, Marker, useVizTheme } from "../viz";
 import { meanFatigue, relativeTime } from "../stateVector";
 import { CapacityView } from "./twin/CapacityView";
@@ -498,15 +499,23 @@ function NextSessionCard() {
                 ]
                   .filter(Boolean)
                   .join(" · ");
+                const tags = ex.weak_point_tags ?? [];
                 return (
-                  <div key={i} className="flex items-baseline justify-between gap-3">
-                    <span className="text-[13px] font-semibold leading-none text-soft">{ex.name}</span>
-                    {detail && <span className="font-mono text-[12px] leading-none text-faint">{detail}</span>}
+                  <div key={i} className="flex flex-col gap-[6px]">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-[13px] font-semibold leading-none text-soft">{ex.name}</span>
+                      {detail && <span className="font-mono text-[12px] leading-none text-faint">{detail}</span>}
+                    </div>
+                    <WeakPointTags tags={tags} />
                   </div>
                 );
               })}
             </div>
           )}
+          {/* Twin fetched the same prescription as Planning and dropped `why` entirely, so
+              the same athlete got a reasoned session on one screen and a bare one here.
+              Same component, same contract — the two can no longer disagree. */}
+          <WhyThisSession why={body.rx.why} />
         </div>
       )}
     </Card>

@@ -7,14 +7,17 @@
 // are NOT rendered for authenticated users — they need a backend contract that
 // does not exist yet (Fork C0 → C1b, still open). Guests keep the full simulated
 // preview, clearly labelled as sample data.
-import { useMemo, type ReactNode } from "react";
+import { useMemo } from "react";
 import * as api from "@/api/perfLabClient";
 import { useAuth } from "@/auth/useAuth";
 import type { PlannedSessionRead, ReadinessScore, WorkoutPrescription } from "@/types";
 import { usePerfLab } from "../store";
 import { useAuthedResource } from "../useAuthedResource";
 import { assertNever, type AuthedResource } from "../resource";
-import { Card, MetricBar, ScreenHeader, SectionLabel } from "../ui";
+import { Card, MetricBar, ScreenHeader, SectionLabel, WeakPointTags } from "../ui";
+import { WhyThisSession } from "../prescription/WhyThisSession";
+import { ExpectedOutcomes } from "../prescription/ExpectedOutcomes";
+import { PlanRevisionTriggers } from "../prescription/PlanRevisionTriggers";
 import { Chart, Bars, Line, Marker, Axis, Legend, useVizTheme } from "../viz";
 import { PHASES, PLAN_DAYS, PLAN_LOAD, PLAN_READY } from "../sim";
 import { COLORS } from "../readinessPresentation";
@@ -285,10 +288,14 @@ function PrescribedSessionBody({ resource }: { resource: AuthedResource<WorkoutP
                 ]
                   .filter(Boolean)
                   .join(" · ");
+                const tags = ex.weak_point_tags ?? [];
                 return (
-                  <div key={i} className="flex items-baseline justify-between gap-3">
-                    <span className="text-[13px] font-semibold leading-none text-soft">{ex.name}</span>
-                    {detail && <span className="font-mono text-[12px] leading-none text-faint">{detail}</span>}
+                  <div key={i} className="flex flex-col gap-[6px]">
+                    <div className="flex items-baseline justify-between gap-3">
+                      <span className="text-[13px] font-semibold leading-none text-soft">{ex.name}</span>
+                      {detail && <span className="font-mono text-[12px] leading-none text-faint">{detail}</span>}
+                    </div>
+                    <WeakPointTags tags={tags} />
                   </div>
                 );
               })}
@@ -296,6 +303,11 @@ function PrescribedSessionBody({ resource }: { resource: AuthedResource<WorkoutP
           )}
 
           <WhyThisSession why={rx.why} />
+          <ExpectedOutcomes
+            outcomes={rx.why?.expected_outcomes ?? []}
+            horizon={rx.why?.expected_outcome_horizon}
+          />
+          <PlanRevisionTriggers triggers={rx.why?.plan_revision_triggers ?? []} />
         </div>
       );
     }
@@ -303,61 +315,6 @@ function PrescribedSessionBody({ resource }: { resource: AuthedResource<WorkoutP
     default:
       return assertNever(resource);
   }
-}
-
-// Compact explanation, built only from human-readable fields of the live
-// PrescriptionExplanation. Rationale is the headline (shown above); this adds
-// state drivers, goal alignment and applied constraints when present. Internal
-// keys (branch id, fit score, source templates) are intentionally not surfaced.
-function WhyThisSession({ why }: { why?: WorkoutPrescription["why"] }) {
-  if (!why) return null;
-  const drivers = why.state_drivers ?? [];
-  const constraints = why.constraints_applied ?? [];
-  const goalAlignment = why.goal_alignment?.trim() ?? "";
-  if (drivers.length === 0 && constraints.length === 0 && !goalAlignment) return null;
-
-  return (
-    <div className="rounded-[12px] border border-ac/[0.18] bg-ac/[0.05] p-[16px]">
-      <div className="mb-3 flex items-center gap-2 font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.1em] text-ac">
-        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2"><path d="M12 2v6M12 22v-2M5 12H2M22 12h-3" /><circle cx="12" cy="12" r="4" /></svg>
-        Why this session
-      </div>
-      <div className="flex flex-col gap-[14px]">
-        {goalAlignment && (
-          <WhySection label="Goal alignment">
-            <div className="text-[12.5px] font-medium leading-[1.55] text-mute">{goalAlignment}</div>
-          </WhySection>
-        )}
-        {drivers.length > 0 && (
-          <WhySection label="State drivers">
-            <ul className="flex flex-col gap-[6px]">
-              {drivers.map((d, i) => (
-                <li key={i} className="text-[12.5px] font-medium leading-[1.5] text-mute">{d}</li>
-              ))}
-            </ul>
-          </WhySection>
-        )}
-        {constraints.length > 0 && (
-          <WhySection label="Constraints applied">
-            <ul className="flex flex-col gap-[6px]">
-              {constraints.map((c, i) => (
-                <li key={i} className="text-[12.5px] font-medium leading-[1.5] text-mute">{c}</li>
-              ))}
-            </ul>
-          </WhySection>
-        )}
-      </div>
-    </div>
-  );
-}
-
-function WhySection({ label, children }: { label: string; children: ReactNode }) {
-  return (
-    <div>
-      <div className="mb-[6px] font-mono text-[9.5px] font-semibold uppercase leading-none tracking-[0.12em] text-faint">{label}</div>
-      {children}
-    </div>
-  );
 }
 
 // Loading / error placeholder — kept visually distinct from the no-block CTA so a

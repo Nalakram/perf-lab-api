@@ -14,6 +14,8 @@ import {
 import { useAuth } from "@/auth/useAuth";
 import type { AssessmentBenchmarkCard, ApiError, OnboardingStateResponse } from "@/types";
 import { Card, Pill, ScreenHeader, SectionLabel } from "../ui";
+import { BAND } from "../prescription/axes";
+import { MeasurementRecommendations } from "../prescription/MeasurementRecommendations";
 import { ResourceState } from "../ResourceState";
 import { assertNever, resourceData } from "../resource";
 import { usePerfLab } from "../store";
@@ -24,11 +26,10 @@ type Mode = "onramp" | "retest";
 const inputCls =
   "w-full rounded-[10px] border border-white/10 bg-panel px-3 py-2 text-[14px] text-ink font-mono";
 
-const CONF: Record<string, { label: string; cls: string }> = {
-  established: { label: "measured", cls: "text-mint border-mint/30 bg-mint/[0.06]" },
-  provisional: { label: "provisional", cls: "text-warn border-warn/30 bg-warn/[0.06]" },
-  insufficient: { label: "unmeasured", cls: "text-hot border-hot/30 bg-hot/[0.06]" },
-};
+// The band vocabulary moved to prescription/axes so this screen and the prescription
+// explanation cannot drift into two sets of words for the same three literals. Aliased
+// rather than renamed at the call site to keep this diff about the move.
+const CONF = BAND;
 
 export function AssessmentSurfaceScreen() {
   const { token } = useAuth();
@@ -55,6 +56,11 @@ export function AssessmentSurfaceScreen() {
       />
 
       <OnboardingBanner />
+
+      {/* The measurement ask arrives on the PRESCRIPTION but belongs here, where the
+          athlete can act on it. Renders nothing when there is nothing to ask for.
+          `loaded` lets each row name the benchmark that actually measures that axis. */}
+      <MeasurementRecommendations surface={loaded} />
 
       <div className="flex items-center gap-2">
         {(["onramp", "retest"] as Mode[]).map((m) => (

@@ -201,24 +201,65 @@ function sorenessWord(v: number): string {
  * Every field on `WellnessSampleOut` is nullable except identity, so each tile
  * resolves independently: a row with HRV but no resting HR shows one value and one
  * em-dash, never a borrowed number.
+ *
+ * A day has MORE THAN ONE row. `WellnessSample` is keyed (user, date, source), so an
+ * Oura sync and a manual check-in on the same morning are two rows, and reading only
+ * the newest dropped whichever landed first — the athlete reported soreness and the
+ * tile said "not recorded". Resolution here is per signal across every row for the
+ * latest date, which is the shape the readiness engine already resolves to.
+ *
+ * Which source to BELIEVE when two report the same signal is a physiological judgement
+ * (a device measures HRV better than a person; nobody measures soreness but the
+ * athlete) and it is not this module's to make — `app/logic/wellness_source_authority`
+ * owns it. So the resolved value is taken from `readiness.components` when the backend
+ * published one for that signal, and only falls back to the day's first non-null when
+ * it did not. That keeps the tile agreeing with the ring above it: both then show the
+ * number the engine actually used.
  */
-export function morningSection(resource: AuthedResource<WellnessSampleOut[]>): MorningView {
-  const latest = fold<WellnessSampleOut[], WellnessSampleOut>(resource, (rows) =>
-    rows.length === 0 ? { kind: "empty", reason: "no_data" } : { kind: "value", value: rows[0] },
-  );
+export function morningSection(
+  resource: AuthedResource<WellnessSampleOut[]>,
+  readiness: AuthedResource<ReadinessScore>,
+): MorningView {
+  const day = fold<WellnessSampleOut[], WellnessSampleOut[]>(resource, (rows) => {
+    if (rows.length === 0) return { kind: "empty", reason: "no_data" };
+    // The endpoint orders (date desc, created_at desc), so rows[0] carries the latest
+    // date and the day's rows are the contiguous run sharing it.
+    const latestDate = rows[0].date;
+    return { kind: "value", value: rows.filter((r) => r.date === latestDate) };
+  });
 
-  const field = (read: (s: WellnessSampleOut) => string | null): MetricState<string> =>
-    latest.kind === "value" ? fromNullable(read(latest.value), "not_recorded") : latest;
+  // Only trust the engine's resolution when it is describing the same day these tiles
+  // are showing. Components exist only for a sample the backend considered fresh, so a
+  // stale day (or an athlete with no modeled state) legitimately has none.
+  const resolved: Record<string, number> = {};
+  if (readiness.status === "success" && day.kind === "value") {
+    const score = readiness.data;
+    if (score.wellness_sample?.date === day.value[0]?.date) {
+      for (const c of score.components ?? []) resolved[c.signal] = c.value;
+    }
+  }
+
+  const field = (
+    signal: string,
+    read: (s: WellnessSampleOut) => number | null | undefined,
+    format: (v: number) => string,
+  ): MetricState<string> => {
+    if (day.kind !== "value") return day;
+    const engine = resolved[signal];
+    if (engine != null) return { kind: "value", value: format(engine) };
+    const reported = day.value.map(read).find((v) => v != null);
+    return fromNullable(reported == null ? null : format(reported), "not_recorded");
+  };
 
   const metrics: MorningMetric[] = [
-    { key: "hrv", label: "HRV", value: field((s) => (s.hrv_ms == null ? null : `${s.hrv_ms} ms`)) },
-    { key: "sleep", label: "Sleep", value: field((s) => (s.sleep_hours == null ? null : `${s.sleep_hours} h`)) },
-    { key: "resting_hr", label: "Rest HR", value: field((s) => (s.resting_hr == null ? null : `${s.resting_hr} bpm`)) },
-    { key: "soreness", label: "Soreness", value: field((s) => (s.soreness == null ? null : sorenessWord(s.soreness))) },
+    { key: "hrv", label: "HRV", value: field("hrv_ms", (s) => s.hrv_ms, (v) => `${v} ms`) },
+    { key: "sleep", label: "Sleep", value: field("sleep_hours", (s) => s.sleep_hours, (v) => `${v} h`) },
+    { key: "resting_hr", label: "Rest HR", value: field("resting_hr", (s) => s.resting_hr, (v) => `${v} bpm`) },
+    { key: "soreness", label: "Soreness", value: field("soreness", (s) => s.soreness, sorenessWord) },
   ];
 
   const lastLoggedDate: MetricState<string> =
-    latest.kind === "value" ? { kind: "value", value: latest.value.date } : latest;
+    day.kind === "value" ? { kind: "value", value: day.value[0].date } : day;
 
   return { metrics, lastLoggedDate };
 }

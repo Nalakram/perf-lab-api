@@ -85,7 +85,11 @@ export function AuthedOverview() {
   const { user, profile, email } = useAuth();
 
   const readinessRes = useAuthedResource<ReadinessScore>((t) => api.getReadiness(t), [state.readinessRefreshKey]);
-  const wellnessRes = useAuthedResource<WellnessSampleOut[]>((t) => api.listWellness(t, 1), [state.readinessRefreshKey]);
+  // A day is several rows, not one: `WellnessSample` is keyed (user, date, source), so a
+  // device sync and a manual check-in both land. Asking for 1 returned whichever was
+  // ingested last and silently dropped the other's signals. `morningSection` folds the
+  // latest date's rows per signal; the limit only has to be wide enough to contain them.
+  const wellnessRes = useAuthedResource<WellnessSampleOut[]>((t) => api.listWellness(t, 8), [state.readinessRefreshKey]);
   // Annotated as the type the endpoint actually returns (#187). The selectors read
   // no snapshot_id and no confidence field, so behaviour is identical without them.
   const historyRes = useAuthedResource<StateHistorySnapshotRead[]>(
@@ -106,7 +110,7 @@ export function AuthedOverview() {
 
   const readiness = readinessSection(readinessRes);
   const trend = trendSection(historyRes);
-  const morning = morningSection(wellnessRes);
+  const morning = morningSection(wellnessRes, readinessRes);
   const twin = twinSnapshotSection(historyRes);
   const load = loadSection(overviewRes);
   const habit = habitSection(overviewRes);
