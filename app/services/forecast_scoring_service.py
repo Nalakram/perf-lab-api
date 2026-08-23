@@ -38,6 +38,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.engine.state_loading import unified_from_athlete_row_strict
 from app.models.athlete_state import AthleteState
 from app.models.mesocycle import PlannedSession, SessionStatus
+from app.repositories.athlete_context_repository import AthleteContextRepository
 from app.schemas.state import UnifiedStateVector
 
 #: Why a completed, forecast-carrying session could not be scored. Counted, never hidden:
@@ -121,6 +122,25 @@ def _forecast_of(session: PlannedSession) -> list[dict[str, Any]]:
     return found
 
 
+def _bracket(
+    states: list[AthleteState], at: Any
+) -> tuple[AthleteState | None, AthleteState | None]:
+    """The last snapshot at or before ``at``, and the first strictly after it.
+
+    ``states`` is ascending by timestamp (the repository's contract), so a linear scan is
+    correct and the ordering assumption lives in one place rather than in two queries.
+    """
+    before: AthleteState | None = None
+    after: AthleteState | None = None
+    for row in states:
+        if row.timestamp <= at:
+            before = row
+        else:
+            after = row
+            break
+    return before, after
+
+
 async def score_forecasts(
     db: AsyncSession,
     *,
@@ -146,6 +166,8 @@ async def score_forecasts(
 
     axes: dict[str, AxisError] = {}
     skipped: dict[str, int] = {}
+    # One timeline load per athlete, reused across that athlete's sessions.
+    states_by_user: dict[int, list[AthleteState]] = {}
     scored = 0
 
     def _skip(reason: str) -> None:
@@ -156,24 +178,15 @@ async def score_forecasts(
         if not forecast:
             continue  # no prediction was recorded; nothing to score, and not a failure
 
-        before_row = (
-            await db.execute(
-                select(AthleteState)
-                .where(AthleteState.user_id == session.user_id)
-                .where(AthleteState.timestamp <= session.completed_at)
-                .order_by(AthleteState.timestamp.desc())
-                .limit(1)
+        # Through the repository seam, never an inline select(AthleteState): CONTEXT.md
+        # keeps every AthleteState read behind AthleteContextRepository, and
+        # tests/test_athlete_state_seam.py enforces it. Loading each athlete's timeline
+        # once and bracketing in memory is also cheaper than two queries per session.
+        if session.user_id not in states_by_user:
+            states_by_user[session.user_id] = list(
+                await AthleteContextRepository(db).list_states_ascending(session.user_id)
             )
-        ).scalars().first()
-        after_row = (
-            await db.execute(
-                select(AthleteState)
-                .where(AthleteState.user_id == session.user_id)
-                .where(AthleteState.timestamp > session.completed_at)
-                .order_by(AthleteState.timestamp.asc())
-                .limit(1)
-            )
-        ).scalars().first()
+        before_row, after_row = _bracket(states_by_user[session.user_id], session.completed_at)
         if before_row is None or after_row is None:
             _skip(SKIP_NO_BRACKET)
             continue
