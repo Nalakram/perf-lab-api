@@ -31,6 +31,7 @@ from app.logic.wellness_registry import (
     signal_from_metric,
 )
 from app.logic.wellness_signals import SIGNAL_CONFIG as _SIGNAL_CONFIG
+from app.logic.wellness_source_authority import resolve_signal_source
 from app.logic.wellness_tracking import get_expected_tracked_signals
 from app.models.user import AthleteProfile
 from app.models.wellness import WellnessSample
@@ -272,8 +273,69 @@ async def _latest_wellness(db: AsyncSession, user_id: int) -> WellnessSample | N
     ).scalars().first()
 
 
-async def _baselines(db: AsyncSession, user_id: int, before: date_cls) -> dict[str, float | None]:
-    """Mean per signal over prior samples in the trailing window (excludes ``before``)."""
+async def _samples_on(
+    db: AsyncSession, user_id: int, on_date: date_cls
+) -> list[WellnessSample]:
+    """Every source's sample for one day. The table is keyed (user, date, source)."""
+    return list(
+        (
+            await db.execute(
+                select(WellnessSample).where(
+                    WellnessSample.user_id == user_id,
+                    WellnessSample.date == on_date,
+                )
+            )
+        )
+        .scalars()
+        .all()
+    )
+
+
+async def _resolve_day(
+    db: AsyncSession, user_id: int, on_date: date_cls
+) -> tuple[dict[str, float | None], dict[str, str]]:
+    """Merge one day's sources into one value per signal, and say which source won.
+
+    Previously readiness read a single row, so when an Oura sync and a manual check-in both
+    landed the loser's signals were dropped entirely — the athlete reported soreness and it
+    was silently ignored, which also under-counted coverage and lowered their confidence.
+
+    Resolution is per signal, not per row: a device wins HRV while the athlete wins
+    soreness, on the same day, from different rows.
+    """
+    rows = await _samples_on(db, user_id, on_date)
+    values: dict[str, float | None] = {}
+    source_by_signal: dict[str, str] = {}
+    for sig in _SIGNALS:
+        chosen = resolve_signal_source(
+            sig, [(r.source, getattr(r, sig), r.created_at) for r in rows]
+        )
+        if chosen is None:
+            values[sig] = None  # nobody reported it; it stays missing
+            continue
+        source_by_signal[sig], values[sig] = chosen
+    return values, source_by_signal
+
+
+async def _baselines(
+    db: AsyncSession,
+    user_id: int,
+    before: date_cls,
+    source_by_signal: dict[str, str] | None = None,
+) -> dict[str, float | None]:
+    """Mean per signal over prior samples in the trailing window (excludes ``before``).
+
+    When ``source_by_signal`` is supplied, each signal's baseline is computed from ONLY the
+    source that produced today's value. Averaging every provider together compares an Oura
+    HRV against a mean containing manual entries and any other device, so switching provider
+    mid-window shifts the baseline and the athlete's deviation is measured against a number
+    no single instrument ever produced.
+
+    A source with no history in the window yields ``None``, and the caller falls back to the
+    population anchor exactly as it does for a brand-new athlete. That is the honest cost of
+    switching providers: the personal baseline restarts, because the new device's offset for
+    this athlete is genuinely unknown. It is not silently borrowed from the old one.
+    """
     rows = (
         await db.execute(
             select(WellnessSample).where(
@@ -285,7 +347,12 @@ async def _baselines(db: AsyncSession, user_id: int, before: date_cls) -> dict[s
     ).scalars().all()
     out: dict[str, float | None] = {}
     for sig in _SIGNALS:
-        vals = [getattr(r, sig) for r in rows if getattr(r, sig) is not None]
+        wanted = (source_by_signal or {}).get(sig)
+        vals = [
+            getattr(r, sig)
+            for r in rows
+            if getattr(r, sig) is not None and (wanted is None or r.source == wanted)
+        ]
         out[sig] = sum(vals) / len(vals) if vals else None
     return out
 
@@ -405,8 +472,21 @@ async def compute_readiness(
 
     fresh_sample = latest if latest is not None and latest.date >= today else None
     stale_sample = latest if latest is not None and latest.date < today else None
-    provided_today = provided_signals(fresh_sample) if fresh_sample is not None else set[str]()
-    stale_signals = provided_signals(stale_sample) if stale_sample is not None else set[str]()
+
+    # Resolved across every source that reported that day, not just the row `latest`
+    # happened to be. Coverage is counted off the merge for the same reason readiness is:
+    # a signal the athlete supplied from a second source is supplied, and counting it as
+    # missing would lower their confidence for data they actually gave.
+    fresh_values: dict[str, float | None] = {}
+    fresh_sources: dict[str, str] = {}
+    if fresh_sample is not None:
+        fresh_values, fresh_sources = await _resolve_day(db, user_id, fresh_sample.date)
+
+    provided_today = provided_signals(fresh_values) if fresh_sample is not None else set[str]()
+    stale_signals: set[str] = set()
+    if stale_sample is not None:
+        stale_values, _ = await _resolve_day(db, user_id, stale_sample.date)
+        stale_signals = provided_signals(stale_values)
     untracked_bucket = set(coverage_signals()) - expected
 
     def _confidence(has_load: bool) -> ReadinessConfidence:
@@ -432,9 +512,11 @@ async def compute_readiness(
     modifier = 0.0
     components: list[ReadinessComponent] = []
     if fresh_sample is not None:
-        values = {sig: getattr(fresh_sample, sig) for sig in _SIGNALS}
-        baselines = await _baselines(db, user_id, before=fresh_sample.date)
-        modifier, components = wellness_modifier(values, baselines)
+        # Each signal is compared against the baseline of the source that produced it.
+        baselines = await _baselines(
+            db, user_id, before=fresh_sample.date, source_by_signal=fresh_sources
+        )
+        modifier, components = wellness_modifier(fresh_values, baselines)
 
     readiness_0_1 = combine_readiness(modeled_0_1, modifier)
     score_0_100 = round(readiness_0_1 * 100.0, 1)
