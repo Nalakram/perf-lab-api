@@ -3,7 +3,8 @@
 Uncertainty was reported but never acted on: the twin could say "I am not sure about your
 max strength" and then prescribe exactly as if it were sure. This is the lever, built the
 way app/engine/feature_flags.py demands - a real OFF branch and a real ON branch a test can
-tell apart - and defaulting to off so enabling it stays a deliberate decision.
+tell apart. It shipped at "off"; as of 2026-08-23 it runs at "shadow", which reports what the
+reduction would be without applying it. Moving to "on" remains a separate decision.
 
 The cap is the lever rather than the load because prescription_service derives percentage,
 kg and the load note from ``rpe_cap``; scaling the resolved kg afterwards would leave the
@@ -27,12 +28,35 @@ def _d(cap: float = 8.0, status: str | None = "insufficient", mode: str = MODE_O
     return decide(baseline_rpe_cap=cap, weakest_status=status, mode=mode)  # type: ignore[arg-type]
 
 
-# ── off must be inert ─────────────────────────────────────────────────────────
+# ── the live setting must stay observational ──────────────────────────────────
 
 
-def test_the_flag_defaults_to_off() -> None:
-    """Enabling this changes what athletes are prescribed, so it ships dormant."""
-    assert feature_flags.UNCERTAINTY_CONSERVATISM == MODE_OFF
+def test_the_live_mode_is_observational_not_active() -> None:
+    """The flag is at "shadow" by owner decision (2026-08-23), not at "on".
+
+    Shadow reports what the reduction would be without applying it, so prescribed loads are
+    unchanged. Moving to "on" changes the weight on the bar for real athletes and is a
+    separate, deliberate decision - this test is what makes that decision visible in a diff
+    rather than a one-character edit nobody reviews.
+    """
+    assert feature_flags.UNCERTAINTY_CONSERVATISM in {MODE_OFF, MODE_SHADOW}
+    assert feature_flags.UNCERTAINTY_CONSERVATISM == MODE_SHADOW
+
+
+def test_the_live_mode_does_not_move_any_cap() -> None:
+    """Whatever the flag currently says, today's setting must not alter a prescription.
+
+    Guards the promise made when shadow was enabled: observation only. If someone flips the
+    constant to "on", this fails and the change cannot land unnoticed.
+    """
+    for status in ("insufficient", "provisional", "established", None):
+        d = decide(
+            baseline_rpe_cap=8.0,
+            weakest_status=status,  # type: ignore[arg-type]
+            mode=feature_flags.UNCERTAINTY_CONSERVATISM,
+        )
+        assert d.effective_rpe_cap == 8.0, f"{status} moved the cap under the live mode"
+        assert d.applied is False
 
 
 @pytest.mark.parametrize("status", ["insufficient", "provisional", "established", None])

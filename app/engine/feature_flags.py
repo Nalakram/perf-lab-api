@@ -37,4 +37,7 @@ DECLINE_CANDIDATE_PRESCRIPTION_BASIS: str = "off"
 #   "on"     → a low-confidence weakest capacity axis lowers the working RPE cap, and
 #              percentage / kg / load-note all follow from it.
 # Read by app/services/prescription_service.py (_enrich_exercises_with_load).
-UNCERTAINTY_CONSERVATISM: str = "off"
+# 2026-08-23: moved off -> shadow by owner decision. Shadow computes the reduction and
+# reports it on every prescription without applying it, so prescribed loads are unchanged
+# and the effect can be watched on real athletes before anyone decides on "on".
+UNCERTAINTY_CONSERVATISM: str = "shadow"
