@@ -230,6 +230,7 @@ async def sync_connection(
             resting_hr=r.resting_hr,
             soreness=r.soreness,
             mood=r.mood,
+            stress=r.stress,
             # Freshness and provider-reported reliability, when the adapter supplies them.
             # Both stay None otherwise rather than being defaulted.
             measured_at=r.measured_at,
