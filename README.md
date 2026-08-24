@@ -91,7 +91,7 @@ flowchart TB
     direction LR
     API["app/<br/>FastAPI 0.3.0"]
     WEB["web/<br/>React 19 + Vite"]
-    DB[(Postgres 16<br/>Alembic a000–a038)]
+    DB[(Postgres 16<br/>Alembic a000–a040)]
     T["tests/ · 196 modules<br/>web vitest · 22 files"]
   end
   WEB -->|OpenAPI → types.gen.ts| API
