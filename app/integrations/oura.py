@@ -245,6 +245,9 @@ def _sleep_doc_to_wellness(
     return NormalizedWellness(
         day=date_cls.fromisoformat(day),
         hrv_ms=float(hrv) if isinstance(hrv, (int, float)) else None,
+        # Oura's v2 `average_hrv` is an average of 5-minute rMSSD windows across sleep — a
+        # documented vendor property, not an inference from the value.
+        hrv_metric="rmssd" if isinstance(hrv, (int, float)) else None,
         sleep_hours=sleep_hours,
         sleep_quality=sleep_quality,
         resting_hr=float(lowest_hr) if isinstance(lowest_hr, (int, float)) else None,

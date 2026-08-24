@@ -17,6 +17,12 @@ from pydantic import BaseModel, ConfigDict, Field
 ReadinessBand = Literal["low", "moderate", "good", "high"]
 ConfidenceBand = Literal["low", "medium", "high"]
 ConfidenceStatus = Literal["well_supported", "partial_data", "sparse_data", "stale_data"]
+
+#: Which HRV metric a reading holds. One Literal typing every publisher — the schema, the
+#: provider seam and the ORM's CHECK — so a new metric cannot be added in one place only.
+#: Oura/Whoop/Garmin report rmssd; Apple Watch (HealthKit) reports sdnn, and the two are not
+#: interchangeable: SDNN runs 10-25% higher on the same inter-beat intervals.
+HrvMetric = Literal["rmssd", "sdnn"]
 # Report-only in P8 (enforced=False); the prescriber does NOT obey this yet (P13).
 RecommendationAuthority = Literal[
     "normal", "conservative", "very_conservative", "assessment_prompt_only"
@@ -32,6 +38,15 @@ class WellnessSampleIn(BaseModel):
     date: date_cls
     source: str = Field("manual", max_length=50, description="manual | google_fit | oura | …")
     hrv_ms: float | None = Field(default=None, ge=0.0, description="rMSSD-style HRV (ms)")
+    hrv_metric: HrvMetric | None = Field(
+        default=None,
+        description=(
+            "Which HRV metric `hrv_ms` holds. Devices differ — Oura/Whoop/Garmin report "
+            "rmssd, Apple Watch reports sdnn — and SDNN runs 10-25% higher on the same "
+            "beats, so baselines only average like against like. Omit when the source "
+            "does not say; that is read as unknown, never as an assumed rmssd."
+        ),
+    )
     sleep_hours: float | None = Field(default=None, ge=0.0, le=24.0)
     sleep_quality: float | None = Field(default=None, ge=0.0, le=100.0)
     resting_hr: float | None = Field(default=None, ge=0.0, le=250.0)
@@ -63,6 +78,7 @@ class WellnessSampleOut(BaseModel):
     date: date_cls
     source: str
     hrv_ms: float | None
+    hrv_metric: HrvMetric | None = None
     sleep_hours: float | None
     sleep_quality: float | None
     resting_hr: float | None

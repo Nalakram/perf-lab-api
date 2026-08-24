@@ -293,7 +293,7 @@ async def _samples_on(
 
 async def _resolve_day(
     db: AsyncSession, user_id: int, on_date: date_cls
-) -> tuple[dict[str, float | None], dict[str, str]]:
+) -> tuple[dict[str, float | None], dict[str, str], dict[str, str | None]]:
     """Merge one day's sources into one value per signal, and say which source won.
 
     Previously readiness read a single row, so when an Oura sync and a manual check-in both
@@ -302,10 +302,19 @@ async def _resolve_day(
 
     Resolution is per signal, not per row: a device wins HRV while the athlete wins
     soreness, on the same day, from different rows.
+
+    The third return value reports the winning row's ``hrv_metric`` — which HRV metric today's
+    number actually is. Devices disagree (Oura reports rMSSD, Apple Watch SDNN, and SDNN runs
+    10-25% higher on the same beats), so the baseline must be built from the same metric or
+    the athlete's deviation is measured against a number no instrument produced. Keyed like
+    ``source_by_signal`` so the two travel together; only ``hrv_ms`` carries a metric today.
     """
     rows = await _samples_on(db, user_id, on_date)
+    # (user, date, source) is unique, so the winning source identifies its row for this day.
+    row_by_source = {r.source: r for r in rows}
     values: dict[str, float | None] = {}
     source_by_signal: dict[str, str] = {}
+    metric_by_signal: dict[str, str | None] = {}
     for sig in _SIGNALS:
         chosen = resolve_signal_source(
             sig,
@@ -324,7 +333,16 @@ async def _resolve_day(
             values[sig] = None  # nobody reported it; it stays missing
             continue
         source_by_signal[sig], values[sig] = chosen
-    return values, source_by_signal
+        if sig == "hrv_ms":
+            winner = row_by_source.get(source_by_signal[sig])
+            if winner is not None:
+                # Recorded even when the winner declared nothing. A present key carrying
+                # ``None`` means "today's reading is undeclared, so compare it only against
+                # other undeclared history"; an ABSENT key means the caller never asked and
+                # the metric filter does not apply at all. Collapsing those two would either
+                # pool unlike metrics or silently empty every existing caller's baseline.
+                metric_by_signal[sig] = winner.hrv_metric
+    return values, source_by_signal, metric_by_signal
 
 
 async def _baselines(
@@ -332,6 +350,7 @@ async def _baselines(
     user_id: int,
     before: date_cls,
     source_by_signal: dict[str, str] | None = None,
+    metric_by_signal: dict[str, str | None] | None = None,
 ) -> dict[str, float | None]:
     """Mean per signal over prior samples in the trailing window (excludes ``before``).
 
@@ -341,10 +360,18 @@ async def _baselines(
     mid-window shifts the baseline and the athlete's deviation is measured against a number
     no single instrument ever produced.
 
+    ``metric_by_signal`` applies the same rule one level down. ``hrv_ms`` records a number but
+    not which HRV metric produced it, and rMSSD and SDNN are not interchangeable — SDNN runs
+    10-25% higher on the same inter-beat intervals. Averaging them together produces a mean no
+    device ever reported, and z-scoring against it would move readiness on a units mismatch.
+    A row whose metric differs from today's is therefore excluded, and a row that never
+    declared one (``NULL``) matches only other undeclared rows: unknown is not "assumed rMSSD".
+
     A source with no history in the window yields ``None``, and the caller falls back to the
     population anchor exactly as it does for a brand-new athlete. That is the honest cost of
-    switching providers: the personal baseline restarts, because the new device's offset for
-    this athlete is genuinely unknown. It is not silently borrowed from the old one.
+    switching providers — or of switching between devices that report different HRV metrics:
+    the personal baseline restarts, because the new instrument's offset for this athlete is
+    genuinely unknown. It is not silently borrowed from the old one.
     """
     rows = (
         await db.execute(
@@ -358,10 +385,19 @@ async def _baselines(
     out: dict[str, float | None] = {}
     for sig in _SIGNALS:
         wanted = (source_by_signal or {}).get(sig)
+        # Key PRESENCE decides whether the metric filter applies; its value (possibly None)
+        # decides which bucket. Absent = caller did not ask, so behave exactly as before.
+        metrics = metric_by_signal or {}
+        filter_metric = sig in metrics
+        wanted_metric = metrics.get(sig)
         vals = [
             getattr(r, sig)
             for r in rows
-            if getattr(r, sig) is not None and (wanted is None or r.source == wanted)
+            if getattr(r, sig) is not None
+            and (wanted is None or r.source == wanted)
+            # Only hrv_ms carries a metric today. NULL is its own bucket rather than a
+            # wildcard, so undeclared history is never folded into a declared reading's mean.
+            and (not filter_metric or r.hrv_metric == wanted_metric)
         ]
         out[sig] = sum(vals) / len(vals) if vals else None
     return out
@@ -489,13 +525,16 @@ async def compute_readiness(
     # missing would lower their confidence for data they actually gave.
     fresh_values: dict[str, float | None] = {}
     fresh_sources: dict[str, str] = {}
+    fresh_metrics: dict[str, str | None] = {}
     if fresh_sample is not None:
-        fresh_values, fresh_sources = await _resolve_day(db, user_id, fresh_sample.date)
+        fresh_values, fresh_sources, fresh_metrics = await _resolve_day(
+            db, user_id, fresh_sample.date
+        )
 
     provided_today = provided_signals(fresh_values) if fresh_sample is not None else set[str]()
     stale_signals: set[str] = set()
     if stale_sample is not None:
-        stale_values, _ = await _resolve_day(db, user_id, stale_sample.date)
+        stale_values, _, _ = await _resolve_day(db, user_id, stale_sample.date)
         stale_signals = provided_signals(stale_values)
     untracked_bucket = set(coverage_signals()) - expected
 
@@ -522,9 +561,14 @@ async def compute_readiness(
     modifier = 0.0
     components: list[ReadinessComponent] = []
     if fresh_sample is not None:
-        # Each signal is compared against the baseline of the source that produced it.
+        # Each signal is compared against the baseline of the source that produced it —
+        # and, for HRV, of the same metric, since rMSSD and SDNN are not interchangeable.
         baselines = await _baselines(
-            db, user_id, before=fresh_sample.date, source_by_signal=fresh_sources
+            db,
+            user_id,
+            before=fresh_sample.date,
+            source_by_signal=fresh_sources,
+            metric_by_signal=fresh_metrics,
         )
         modifier, components = wellness_modifier(fresh_values, baselines)
 

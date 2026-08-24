@@ -3361,6 +3361,11 @@ export interface components {
              */
             date: string;
             /**
+             * Hrv Metric
+             * @description Which HRV metric `hrv_ms` holds. Devices differ — Oura/Whoop/Garmin report rmssd, Apple Watch reports sdnn — and SDNN runs 10-25% higher on the same beats, so baselines only average like against like. Omit when the source does not say; that is read as unknown, never as an assumed rmssd.
+             */
+            hrv_metric?: ("rmssd" | "sdnn") | null;
+            /**
              * Hrv Ms
              * @description rMSSD-style HRV (ms)
              */
@@ -3422,6 +3427,8 @@ export interface components {
              * Format: date
              */
             date: string;
+            /** Hrv Metric */
+            hrv_metric?: ("rmssd" | "sdnn") | null;
             /** Hrv Ms */
             hrv_ms: number | null;
             /** Id */
