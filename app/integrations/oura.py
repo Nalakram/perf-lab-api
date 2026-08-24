@@ -250,6 +250,7 @@ def _sleep_doc_to_wellness(
         resting_hr=float(lowest_hr) if isinstance(lowest_hr, (int, float)) else None,
         soreness=None,  # Oura does not measure soreness
         mood=None,  # Oura does not measure mood
+        stress=None,  # Oura does not measure stress
         measured_at=_measured_at(doc),
         quality=_quality(doc),
         raw=raw,

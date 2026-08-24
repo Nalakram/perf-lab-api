@@ -44,6 +44,11 @@ class NormalizedWellness:
     resting_hr: float | None = None
     soreness: float | None = None  # 0–10, higher = worse
     mood: float | None = None  # 0–10, higher = better
+    #: 0–10, higher = worse. Added late (ADR-0053 introduced ``stress`` on the wellness
+    #: sample, registry and SIGNAL_CONFIG, but this seam was never updated) — so until now
+    #: a provider that reported stress had nowhere to put it and the value was dropped in
+    #: ``wearable_service``. No current wearable measures it; dataset-backed sources do.
+    stress: float | None = None
 
     #: When the measurement window actually closed, if the provider reports it. Distinct
     #: from ``day`` (a calendar date) and from ingestion time. Naive UTC. ``None`` means the
