@@ -93,7 +93,7 @@ from app.models.user import AthleteProfile, User
 from app.schemas.planning import BlockCreateRequest
 from app.schemas.wellness import WellnessSampleIn
 from app.schemas.workouts import WorkoutLog, WorkoutSetEntry
-from app.scripts import load_hit_strength, load_pmdata
+from app.scripts import load_hit_strength, load_pmdata, load_scopesense
 from app.services import (
     ekf_shadow_service,
     personalization_shadow_service,
@@ -113,12 +113,29 @@ TRAINING_WEEKDAYS = (1, 3, 5)
 # a pure-strength block would.
 MODALITY_CYCLE = ("Strength", "Running", "Hypertrophy")
 
-WELLNESS_SOURCE = "manual"
 
 SOURCE_SYNTHETIC = "synthetic"
 SOURCE_PMDATA = "pmdata"
 SOURCE_HIT_STRENGTH = "hit-strength"
-SOURCES = (SOURCE_SYNTHETIC, SOURCE_PMDATA, SOURCE_HIT_STRENGTH)
+SOURCE_SCOPESENSE = "scopesense"
+SOURCES = (SOURCE_SYNTHETIC, SOURCE_PMDATA, SOURCE_HIT_STRENGTH, SOURCE_SCOPESENSE)
+
+# The `source` recorded on replayed wellness rows. A real corpus is labelled by its own name
+# rather than "manual" so provenance is not misstated — `is_device_source` treats anything but
+# the literal "manual" as a device.
+#
+# KNOWN LIMITATION for ScopeSense: one row carries a self-reported PMSys check-in AND
+# watch-measured HRV/RHR, but `source` is per row, so its subjective signals are ranked as
+# device evidence rather than athlete evidence. Modelling it faithfully would mean two rows
+# per day (one per origin), which the (user, date, source) key supports and per-signal
+# resolution would then merge. Not done here: it doubles the shadow writes per day for a
+# replay corpus whose purpose is realistic estimator input, not provenance fidelity.
+WELLNESS_SOURCE_BY_REPLAY = {
+    SOURCE_SYNTHETIC: "manual",
+    SOURCE_PMDATA: "pmdata",
+    SOURCE_SCOPESENSE: "scopesense",
+    SOURCE_HIT_STRENGTH: "manual",  # writes no wellness rows at all
+}
 
 
 @dataclass
@@ -146,7 +163,7 @@ class _PlannedDay:
     #: ``None`` when the source logged no check-in that day. A day with sessions but no
     #: wellness is a real shape (hit-strength has no check-ins at all) and must not be
     #: filled in — an invented check-in is exactly the defect the rest of this file avoids.
-    wellness: dict[str, float | None] | None
+    wellness: dict[str, float | str | None] | None
     sessions: list[_PlannedSession] = field(default_factory=list)
 
 
@@ -298,6 +315,52 @@ def _hit_strength_plan(days: int | None = None) -> list[_PlannedDay]:
     return [by_offset[k] for k in sorted(by_offset)]
 
 
+def _scopesense_plan(participant: str, days: int | None = None) -> list[_PlannedDay]:
+    """Replay one real ScopeSense participant — the only source with measured HRV.
+
+    Carries ``hrv_metric="sdnn"`` on every reading. HealthKit exposes only SDNN, and the
+    baseline must never average it against rMSSD history (migration a040), so the metric
+    travels with the value rather than being inferred downstream.
+    """
+    wellness = load_scopesense.load_wellness(participant)
+    if not wellness:
+        return []
+
+    sessions_by_day: dict[object, list[_PlannedSession]] = {}
+    for session in load_scopesense.load_sessions(participant):
+        sessions_by_day.setdefault(session.day, []).append(
+            _PlannedSession(
+                session_rpe=session.session_rpe,
+                duration_minutes=session.duration_minutes,
+                modality="Mixed",  # ScopeSense records daily load, not a per-session modality
+            )
+        )
+
+    anchor_day = min(w.day for w in wellness)
+    plan: list[_PlannedDay] = []
+    for reading in sorted(wellness, key=lambda w: w.day):
+        offset = (reading.day - anchor_day).days
+        if days is not None and offset >= days:
+            break
+        plan.append(
+            _PlannedDay(
+                offset=offset,
+                wellness={
+                    "hrv_ms": reading.hrv_ms,
+                    "hrv_metric": reading.hrv_metric,
+                    "sleep_hours": reading.sleep_hours,
+                    "sleep_quality": reading.sleep_quality,
+                    "resting_hr": reading.resting_hr,
+                    "soreness": reading.soreness,
+                    "mood": reading.mood,
+                    "stress": reading.stress,
+                },
+                sessions=sessions_by_day.get(reading.day, []),
+            )
+        )
+    return plan
+
+
 async def _already_replayed(db, user_id: int) -> bool:
     """True when this athlete already has a state timeline.
 
@@ -338,6 +401,7 @@ async def _replay_athlete(
     *,
     plan: list[_PlannedDay],
     with_forecasts: bool,
+    wellness_source: str,
     counts: dict[str, int],
 ) -> None:
     """Drive one athlete through a planned history via the service layer."""
@@ -381,7 +445,7 @@ async def _replay_athlete(
             sample = await readiness_service.upsert_wellness_sample(
                 db,
                 user.id,
-                WellnessSampleIn(date=day.date(), source=WELLNESS_SOURCE, **entry.wellness),  # type: ignore[arg-type]
+                WellnessSampleIn(date=day.date(), source=wellness_source, **entry.wellness),  # type: ignore[arg-type]
             )
             telemetry_snapshot = WellnessTelemetrySnapshot.from_sample(sample)
             ekf_input = build_wellness_shadow_input(user.id, sample.id, sample.soreness)
@@ -460,6 +524,14 @@ async def seed(
                 "PMData is not on disk. Run: "
                 "python -m app.scripts.download_new_datasets --only pmdata"
             )
+    scopesense_participants: list[str] = []
+    if source == SOURCE_SCOPESENSE:
+        scopesense_participants = load_scopesense.participants()
+        if not scopesense_participants:
+            raise SystemExit(
+                "ScopeSense is not on disk. It is OSF-hosted, not Kaggle: download "
+                "https://osf.io/v5acr/ and unpack under data/scopesense/."
+            )
     if source == SOURCE_HIT_STRENGTH and n_users > 1:
         # The corpus is one lifter. Replaying them onto several athletes would be the
         # round-robin contamination this whole exercise exists to remove.
@@ -509,6 +581,7 @@ async def seed(
         label = {
             SOURCE_PMDATA: "real PMData",
             SOURCE_HIT_STRENGTH: "real hit-strength",
+            SOURCE_SCOPESENSE: "real ScopeSense",
         }.get(source, "synthetic")
         print(f"replaying {label} history for {len(candidates)} athlete(s)...")
         for index, (user, profile) in enumerate(candidates):
@@ -516,6 +589,10 @@ async def seed(
                 if source == SOURCE_PMDATA:
                     participant = pmdata_participants[index % len(pmdata_participants)]
                     plan = _pmdata_plan(participant, days)
+                    tag = f" <- {participant}"
+                elif source == SOURCE_SCOPESENSE:
+                    participant = scopesense_participants[index % len(scopesense_participants)]
+                    plan = _scopesense_plan(participant, days)
                     tag = f" <- {participant}"
                 elif source == SOURCE_HIT_STRENGTH:
                     plan = _hit_strength_plan(days)
@@ -534,6 +611,7 @@ async def seed(
                     profile,
                     plan=plan,
                     with_forecasts=with_forecasts,
+                    wellness_source=WELLNESS_SOURCE_BY_REPLAY[source],
                     counts=counts,
                 )
                 print(f"  [ok]   {user.email}{tag}")

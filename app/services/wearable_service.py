@@ -225,6 +225,7 @@ async def sync_connection(
             date=r.day,
             source=conn.provider,
             hrv_ms=r.hrv_ms,
+            hrv_metric=r.hrv_metric,
             sleep_hours=r.sleep_hours,
             sleep_quality=r.sleep_quality,
             resting_hr=r.resting_hr,

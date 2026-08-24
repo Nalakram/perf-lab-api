@@ -69,7 +69,7 @@ def test_registry_covers_the_known_wellness_metrics():
     # an athlete's coverage without them having reported anything more.
     non_signal = {
         "id", "user_id", "date", "source", "raw", "created_at",
-        "measured_at", "quality",
+        "measured_at", "quality", "hrv_metric",
     }
     unregistered = _wellness_sample_columns() - non_signal - {
         metric for sig in WELLNESS_SIGNAL_REGISTRY.values() for metric in sig.metrics

@@ -44,6 +44,11 @@ class WellnessSample(Base):
             "quality IS NULL OR (quality >= 0.0 AND quality <= 1.0)",
             name="ck_wellness_quality_0_1",
         ),
+        # Mirrors alembic a040, same reasoning as the bound above.
+        CheckConstraint(
+            "hrv_metric IS NULL OR hrv_metric IN ('rmssd', 'sdnn')",
+            name="ck_wellness_hrv_metric_vocab",
+        ),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -75,6 +80,13 @@ class WellnessSample(Base):
     # reports `low_battery_alert`, for instance). NULL means the source said nothing about
     # quality, which is not the same as saying the reading is perfect.
     quality: Mapped[float | None] = mapped_column(Float, nullable=True)
+
+    # WHICH HRV metric `hrv_ms` holds: "rmssd" or "sdnn". Devices differ — Oura/Whoop/Garmin
+    # report rMSSD, Apple Watch reports SDNN, and SDNN runs 10-25% higher on the same beats.
+    # A baseline may only average like against like, so this is the comparability key for
+    # `hrv_ms` exactly as `source` is. NULL means the source never declared one and is read
+    # as unknown, never as an assumed rMSSD.
+    hrv_metric: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     # Full source payload for provenance / future signals not yet modeled.
     raw: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)

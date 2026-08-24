@@ -18,6 +18,8 @@ from datetime import date as date_cls
 from datetime import datetime
 from typing import Any, Protocol, runtime_checkable
 
+from app.schemas.wellness import HrvMetric
+
 
 @dataclass(frozen=True)
 class TokenBundle:
@@ -59,6 +61,15 @@ class NormalizedWellness:
     #: provider said nothing about quality, which is NOT the same as asserting it is
     #: perfect — so no adapter should emit 1.0 merely because no problem was flagged.
     quality: float | None = None
+
+    #: WHICH HRV metric ``hrv_ms`` holds: ``"rmssd"`` or ``"sdnn"``. Providers disagree —
+    #: Oura, Whoop and Garmin report rMSSD; Apple Watch reports SDNN, and SDNN runs 10-25%
+    #: higher on the same inter-beat intervals. Baselines average like against like, so an
+    #: adapter reporting ``hrv_ms`` should declare its metric here. ``None`` means it did not
+    #: say, which is read as unknown and never as an assumed rMSSD.
+    #: This belongs on the adapter, not on the sync service: the provider seam forbids the
+    #: service branching on a provider name (``tests/test_wearable_provider_seam.py``).
+    hrv_metric: HrvMetric | None = None
 
     raw: dict[str, Any] = field(default_factory=_empty_raw)
 

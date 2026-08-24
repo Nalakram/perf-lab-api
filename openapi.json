@@ -5897,6 +5897,22 @@
             "title": "Date",
             "type": "string"
           },
+          "hrv_metric": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rmssd",
+                  "sdnn"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "description": "Which HRV metric `hrv_ms` holds. Devices differ \u2014 Oura/Whoop/Garmin report rmssd, Apple Watch reports sdnn \u2014 and SDNN runs 10-25% higher on the same beats, so baselines only average like against like. Omit when the source does not say; that is read as unknown, never as an assumed rmssd.",
+            "title": "Hrv Metric"
+          },
           "hrv_ms": {
             "anyOf": [
               {
@@ -6056,6 +6072,21 @@
             "format": "date",
             "title": "Date",
             "type": "string"
+          },
+          "hrv_metric": {
+            "anyOf": [
+              {
+                "enum": [
+                  "rmssd",
+                  "sdnn"
+                ],
+                "type": "string"
+              },
+              {
+                "type": "null"
+              }
+            ],
+            "title": "Hrv Metric"
           },
           "hrv_ms": {
             "anyOf": [

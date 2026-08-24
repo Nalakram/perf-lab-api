@@ -65,7 +65,7 @@ async def test_signals_from_a_second_source_are_no_longer_dropped(async_db) -> N
         ingested=datetime(2026, 8, 23, 20, 0, tzinfo=UTC),
     )
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["hrv_ms"] == 70.0
     assert values["soreness"] == 6.0
@@ -85,7 +85,7 @@ async def test_the_device_wins_a_measured_signal_both_reported(async_db) -> None
         ingested=datetime(2026, 8, 23, 22, 0, tzinfo=UTC),
     )
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["hrv_ms"] == 70.0
     assert sources["hrv_ms"] == "oura"
@@ -101,7 +101,7 @@ async def test_the_athlete_wins_a_felt_signal_both_reported(async_db) -> None:
         ingested=datetime(2026, 8, 23, 23, 0, tzinfo=UTC),
     )
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["stress"] == 2.0
     assert sources["stress"] == "manual"
@@ -112,7 +112,7 @@ async def test_a_signal_nobody_reported_stays_missing(async_db) -> None:
     uid = user.id
     await _sample(async_db, uid, _TODAY, "oura", hrv_ms=70.0)
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["soreness"] is None
     assert "soreness" not in sources
@@ -206,7 +206,7 @@ async def test_a_battery_flagged_device_reading_loses_to_an_unflagged_one(async_
     )
     await _sample(async_db, uid, _TODAY, "garmin", hrv_ms=66.0)
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["hrv_ms"] == 66.0
     assert sources["hrv_ms"] == "garmin"
@@ -227,7 +227,7 @@ async def test_measurement_time_beats_upload_time_from_real_rows(async_db) -> No
         ingested=datetime(2026, 8, 23, 21, 0, tzinfo=UTC),  # uploaded late
     )
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["hrv_ms"] == 50.0
     assert sources["hrv_ms"] == "oura"
@@ -243,7 +243,7 @@ async def test_rows_without_the_new_columns_still_resolve(async_db) -> None:
         ingested=datetime(2026, 8, 23, 20, 0, tzinfo=UTC),
     )
 
-    values, sources = await _resolve_day(async_db, uid, _TODAY)
+    values, sources, _ = await _resolve_day(async_db, uid, _TODAY)
 
     assert values["hrv_ms"] == 70.0
     assert values["soreness"] == 5.0
