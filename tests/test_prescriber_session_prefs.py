@@ -21,9 +21,11 @@ from app.schemas.state import UnifiedStateVector
 
 # The winning "Powerlifting" candidate under a neutral state (no kpi_summary) is
 # "SBD Strength" (branch pl_sbd_main): duration_min=80, 4 exercise_slots
-# (Back Squat, Bench Press, Deadlift, Back-off Squat). See
+# (Back Squat, Bench Press, Conventional Deadlift, and a Back Squat back-off set). See
 # app/logic/candidate_library.py POWERLIFTING_TEMPLATES.
-_PRIMARY_NAMES = ["Back Squat", "Bench Press", "Deadlift", "Back-off Squat"]
+# The back-off set is the same movement as the top set, so "Back Squat" appears twice —
+# the sets/reps differ, not the exercise.
+_PRIMARY_NAMES = ["Back Squat", "Bench Press", "Conventional Deadlift", "Back Squat"]
 _TEMPLATE_DURATION = 80
 
 
@@ -44,11 +46,12 @@ def _neutral_state(*, muscular: float = 0.0) -> UnifiedStateVector:
     )
 
 
-def test_high_emphasis_appends_accessories():
+def test_high_emphasis_appends_accessories(catalog_snapshot):
     rx = recommend_next_session(
         _neutral_state(),
         goal="Powerlifting",
         block_context={"accessory_emphasis": "high", "accessory_focus": ["posterior_chain"]},
+        catalog=catalog_snapshot,
     )
     names = [e.name for e in rx.exercises]
     assert names[: len(_PRIMARY_NAMES)] == _PRIMARY_NAMES
@@ -56,23 +59,26 @@ def test_high_emphasis_appends_accessories():
     assert any(n in names for n in ("Romanian Deadlift", "Back Extension"))
 
 
-def test_minimal_emphasis_appends_none():
+def test_minimal_emphasis_appends_none(catalog_snapshot):
     rx = recommend_next_session(
         _neutral_state(),
         goal="Powerlifting",
         block_context={"accessory_emphasis": "minimal", "accessory_focus": ["posterior_chain"]},
+        catalog=catalog_snapshot,
     )
     assert [e.name for e in rx.exercises] == _PRIMARY_NAMES
 
 
-def test_target_minutes_sets_duration():
+def test_target_minutes_sets_duration(catalog_snapshot):
     rx45 = recommend_next_session(
         _neutral_state(), goal="Powerlifting",
         block_context={"target_session_minutes": 45},
+        catalog=catalog_snapshot,
     )
     rx90 = recommend_next_session(
         _neutral_state(), goal="Powerlifting",
         block_context={"target_session_minutes": 90},
+        catalog=catalog_snapshot,
     )
     assert 30 <= rx45.duration_min <= 120
     assert 30 <= rx90.duration_min <= 120
@@ -81,7 +87,7 @@ def test_target_minutes_sets_duration():
     assert rx90.duration_min == 90
 
 
-def test_short_target_caps_accessories():
+def test_short_target_caps_accessories(catalog_snapshot):
     """Short target below the template's own duration_min (80) caps appended
     accessories at 1, even under "high" emphasis."""
     rx = recommend_next_session(
@@ -92,13 +98,14 @@ def test_short_target_caps_accessories():
             "accessory_focus": ["posterior_chain"],
             "target_session_minutes": 40,
         },
+        catalog=catalog_snapshot,
     )
     names = [e.name for e in rx.exercises]
     assert len(names) == len(_PRIMARY_NAMES) + 1
     assert rx.duration_min == 40
 
 
-def test_focus_falls_back_to_weak_points():
+def test_focus_falls_back_to_weak_points(catalog_snapshot):
     """No accessory_focus, but an active weak-point tag present → accessories
     bias toward the weak-point tag."""
     rx = recommend_next_session(
@@ -106,6 +113,7 @@ def test_focus_falls_back_to_weak_points():
         goal="Powerlifting",
         active_weak_points=["posterior_chain"],
         block_context={"accessory_emphasis": "balanced"},
+        catalog=catalog_snapshot,
     )
     names = [e.name for e in rx.exercises]
     assert "Romanian Deadlift" in names
@@ -113,13 +121,14 @@ def test_focus_falls_back_to_weak_points():
     assert len(names) == len(_PRIMARY_NAMES) + 2
 
 
-def test_focus_without_emphasis_defaults_to_balanced():
+def test_focus_without_emphasis_defaults_to_balanced(catalog_snapshot):
     """accessory_focus set but accessory_emphasis omitted → missing/None emphasis
     is treated as "balanced" (design decision), appending up to 2 accessories."""
     rx = recommend_next_session(
         _neutral_state(),
         goal="Powerlifting",
         block_context={"accessory_focus": ["posterior_chain"]},
+        catalog=catalog_snapshot,
     )
     names = [e.name for e in rx.exercises]
     assert len(names) == len(_PRIMARY_NAMES) + 2
@@ -127,7 +136,7 @@ def test_focus_without_emphasis_defaults_to_balanced():
     assert "Back Extension" in names
 
 
-def test_target_only_appends_no_accessories():
+def test_target_only_appends_no_accessories(catalog_snapshot):
     """target_session_minutes and accessory_emphasis are independent prefs:
     setting only a session length must drive duration but NOT inject any
     accessories (emphasis/focus both unset)."""
@@ -135,6 +144,7 @@ def test_target_only_appends_no_accessories():
         _neutral_state(),
         goal="Powerlifting",
         block_context={"target_session_minutes": 90},
+        catalog=catalog_snapshot,
     )
     assert rx.duration_min == 90
     assert [e.name for e in rx.exercises] == _PRIMARY_NAMES
@@ -142,7 +152,7 @@ def test_target_only_appends_no_accessories():
     assert not any("block:accessories=" in c for c in rx.why.constraints_applied)
 
 
-def test_block_context_without_new_keys_is_unchanged():
+def test_block_context_without_new_keys_is_unchanged(catalog_snapshot):
     """Regression: a block_context WITHOUT any of the new keys (the shape of
     every block created before this migration) behaves exactly as before —
     no accessories appended, duration scaled only by periodization."""
@@ -150,6 +160,7 @@ def test_block_context_without_new_keys_is_unchanged():
         _neutral_state(),
         goal="Powerlifting",
         block_context={"week_number": 2, "duration_weeks": 8, "deload_every_n_weeks": 4},
+        catalog=catalog_snapshot,
     )
     assert [e.name for e in rx.exercises] == _PRIMARY_NAMES
     expected_vol = periodization_envelope(8, 2, 4).volume_modifier

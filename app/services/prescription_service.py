@@ -14,6 +14,7 @@ from app.engine.engine_state_codec import EngineStateDecodeError
 from app.logic import strength_calibration as sc
 from app.logic import uncertainty_conservatism
 from app.logic.constraint_engine.candidate import SessionCandidate
+from app.logic.exercise_slot import CatalogExercise
 from app.logic.planning import periodization_envelope
 from app.logic.prescriber import recommend_next_session
 from app.logic.workout_history import recent_workout_summaries
@@ -348,9 +349,47 @@ class _PrescriptionContext:
     kpi_summary: dict[str, float]
     active_weak_points: list[str]
     equipment: list[str] | None
+    #: Catalog snapshot the slot resolver selects from (ADR-0016). Loaded once per
+    #: prescription so the pure logic layer never touches the database.
+    catalog: list[CatalogExercise]
     candidate_log: list[SessionCandidate]
     readiness_override: float | None
     readiness_audit: dict[str, Any]
+
+
+def _or_default(value: float | None, default: float) -> float:
+    """Guard a column the ORM types as non-optional but Postgres leaves nullable.
+
+    `Exercise.skill_demand` is declared `Mapped[float]` yet the migration made it nullable, so
+    a row inserted outside the seeder can legally be NULL. The type checker cannot see that;
+    the database can. Note this is NOT `value or default` — a genuine 0.0 must survive.
+    """
+    return default if value is None else value
+
+
+async def _load_exercise_catalog(db: AsyncSession) -> list[CatalogExercise]:
+    """Snapshot the movement catalog as plain data for slot resolution.
+
+    Read whole rather than filtered: the catalog is small (~181 rows) and the resolver needs
+    the full set to rank within, so one query beats a query per slot. Returned as frozen
+    dataclasses so nothing downstream can hold a live ORM instance across a shadow write.
+    """
+    rows = (await db.execute(select(Exercise))).scalars().all()
+    return [
+        CatalogExercise(
+            name=row.name,
+            modality=row.modality,
+            movement_pattern=row.movement_pattern,
+            load_type=row.load_type,
+            pattern_family=row.pattern_family,
+            equipment_required=tuple(row.equipment_required or ()),
+            sport_domains=tuple(row.sport_domains or ()),
+            weak_point_tags=tuple(row.weak_point_tags or ()),
+            skill_demand=_or_default(row.skill_demand, 0.5),
+            e1rm_benchmark_code=row.e1rm_benchmark_code,
+        )
+        for row in rows
+    ]
 
 
 async def _gather_prescription_context(
@@ -454,6 +493,7 @@ async def _gather_prescription_context(
         kpi_summary=kpi_summary,
         active_weak_points=active_weak_points,
         equipment=(profile.equipment if profile else None),
+        catalog=await _load_exercise_catalog(db),
         # candidate_log_out captures the full ranked pool for decision telemetry
         # (Workstream B). It starts empty; the scorer only fills it, never reads it.
         candidate_log=[],
@@ -478,6 +518,7 @@ def _score_prescription(
         block_context=cast(dict[str, Any] | None, ctx.block_context),
         candidate_log_out=ctx.candidate_log,
         readiness_override=ctx.readiness_override,
+        catalog=ctx.catalog,
     )
 
 

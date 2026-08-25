@@ -37,6 +37,11 @@ from app.logic.constraint_engine.candidate import (
 )
 from app.logic.deload_need import compute_deload_need
 from app.logic.domain_vocab import GOAL_TO_DOMAIN, canonical_domain
+from app.logic.exercise_slot import (
+    CatalogExercise,
+    ExerciseSlot,
+    resolve_slots,
+)
 from app.logic.planning import periodization_envelope
 from app.logic.prescription_finalize import finalize_prescription
 from app.schemas.prescription import ExercisePrescription, WorkoutPrescription
@@ -444,17 +449,17 @@ _EQUIPMENT_EXERCISE_MAP: dict[str, list[tuple[str, str, str]]] = {
         ("Bench Press", "4", "4-6"),
     ],
     "dumbbells": [
-        ("DB Goblet Squat", "4", "8-10"),
+        ("Goblet Squat", "4", "8-10"),
         ("DB RDL", "3", "8-10"),
         ("DB Floor Press", "3", "8-12"),
     ],
     "pullup_bar": [
-        ("Pull-Up", "4", "4-8"),
+        ("Pull-up", "4", "4-8"),
         ("Hanging Knee Raise", "3", "10-15"),
     ],
     "bodyweight": [
-        ("Tempo Squat", "4", "8-12"),
-        ("Push-Up", "4", "8-15"),
+        ("Tempo Back Squat (3-0-1)", "4", "8-12"),
+        ("Push-up", "4", "8-15"),
         ("Split Squat", "3", "8-12/side"),
     ],
 }
@@ -479,7 +484,7 @@ _ACCESSORY_BY_TAG: dict[str, list[tuple[str, str, str]]] = {
         ("Back Extension", "3", "12-15"),
     ],
     "push": [
-        ("DB Shoulder Press", "3", "8-10"),
+        ("Dumbbell Shoulder Press", "3", "8-10"),
         ("Dips", "3", "8-12"),
     ],
     "pull": [
@@ -502,7 +507,7 @@ _GENERIC_ACCESSORIES: list[tuple[str, str, str]] = [
     ("Face Pull", "3", "15-20"),
     ("Plank", "3", "45-60s"),
     ("Walking Lunge", "3", "10-12/side"),
-    ("DB Shoulder Press", "3", "8-10"),
+    ("Dumbbell Shoulder Press", "3", "8-10"),
 ]
 
 # Max accessory slots appended per `accessory_emphasis` value. Missing/None
@@ -571,25 +576,59 @@ def _exercise_list_for_equipment(available_equipment: list[str] | None) -> list[
 
 
 def _exercise_list_for_candidate(
-    exercise_slots: list[tuple[str, str, str]],
+    exercise_slots: list[ExerciseSlot],
     available_equipment: list[str] | None,
+    catalog: list[CatalogExercise] | None = None,
+    active_weak_points: list[str] | None = None,
 ) -> list[ExercisePrescription]:
-    """Prefer the winning candidate's goal-specific exercise_slots; fall back
-    to the equipment map only when a template doesn't specify slots (empty
-    list). This is the fix for the bug where a Powerlifting athlete with no
-    equipment configured got the bodyweight default instead of SBD work.
+    """Resolve the winning template's slots against the exercise catalog (ADR-0016).
+
+    Each slot states what the movement must be; the catalog decides which one it is, filtered
+    by the equipment the athlete actually has and biased toward their flagged weak points.
+    Competition lifts pin by benchmark code and are never substituted.
+
+    ``catalog is None`` keeps the pre-catalog behaviour so this stays callable as pure logic
+    (and so a caller without a database still gets a session). A slot that nothing satisfies
+    costs that movement rather than the whole session — the reason is carried in `load_note`
+    so an unfillable requirement is visible instead of silently shortening the workout.
     """
-    if exercise_slots:
-        return [
+    if not exercise_slots:
+        return _exercise_list_for_equipment(available_equipment)
+
+    if catalog is None:
+        return _exercise_list_for_equipment(available_equipment)
+
+    # An empty list means "never configured", which is NOT "owns nothing" — see
+    # exercise_slot._equipment_available. Only a populated list filters.
+    equipment = (
+        frozenset(e.strip().lower() for e in available_equipment if e and e.strip())
+        if available_equipment
+        else None
+    )
+    resolutions = resolve_slots(
+        exercise_slots,
+        catalog,
+        available_equipment=equipment,
+        weak_point_tags=frozenset(active_weak_points or ()),
+    )
+
+    out: list[ExercisePrescription] = []
+    for res in resolutions:
+        if res.chosen is None:
+            continue
+        try:
+            sets = int(res.slot.sets)
+        except ValueError:
+            sets = 1
+        out.append(
             ExercisePrescription(
-                name=name,
-                sets=int(sets),
-                reps=reps,
-                load_note="Autoregulate by RPE; scale to available equipment",
+                name=res.chosen.name,
+                sets=sets,
+                reps=res.slot.reps,
+                load_note=res.slot.load_note or "Autoregulate by RPE; scale to available equipment",
             )
-            for name, sets, reps in exercise_slots
-        ]
-    return _exercise_list_for_equipment(available_equipment)
+        )
+    return out or _exercise_list_for_equipment(available_equipment)
 
 
 def recommend_next_session(
@@ -603,6 +642,7 @@ def recommend_next_session(
     candidate_log_out: list[SessionCandidate] | None = None,
     prescription_arm: str = "adaptive",
     readiness_override: float | None = None,
+    catalog: list[CatalogExercise] | None = None,
 ) -> WorkoutPrescription:
     """
     Candidate-based controller.
@@ -761,7 +801,9 @@ def recommend_next_session(
     # Goal-specific exercise payload — prefer the winning template's
     # exercise_slots; equipment map (with bodyweight fallback) only applies
     # when the template doesn't specify slots.
-    rx.exercises = _exercise_list_for_candidate(scored[0].exercise_slots, available_equipment)
+    rx.exercises = _exercise_list_for_candidate(
+        scored[0].exercise_slots, available_equipment, catalog, active_weak_points
+    )
     if rx.why:
         if available_equipment:
             rx.why.constraints_applied.append("equipment:filtered")

@@ -11,6 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+from app.logic.exercise_slot import ExerciseSlot
 from app.schemas.state import UnifiedStateVector
 
 
@@ -49,7 +50,7 @@ class SessionCandidate:
     # Structured (name, sets, reps) movements from the winning CandidateTemplate.
     # Empty by default — finalization falls back to the equipment map when empty
     # (see app.logic.prescriber._exercise_list_for_candidate).
-    exercise_slots: list[tuple[str, str, str]] = field(default_factory=lambda: [])
+    exercise_slots: list[ExerciseSlot] = field(default_factory=lambda: [])
 
     # Canonical domain (see app.logic.domain_vocab), carried over from the
     # source CandidateTemplate by app.logic.candidate_library.score_template.

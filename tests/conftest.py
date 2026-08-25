@@ -336,6 +336,61 @@ async def async_db(_migrated_schema: None) -> AsyncSession:
     await engine.dispose()
 
 
+@pytest.fixture(scope="session")
+def catalog_snapshot() -> list:
+    """The movement catalog as plain data, built from the seeder source — no database.
+
+    Pure prescriber tests call `recommend_next_session` directly. Passing this as `catalog=`
+    makes them exercise real slot resolution; omitting it silently drops them onto the
+    equipment-map fallback, which is a different code path and proves nothing about selection.
+    """
+    from app.data.exercise_bulk import bulk_exercises
+    from app.logic.exercise_slot import CatalogExercise
+    from app.scripts.seed_exercises import EXERCISES
+
+    return [
+        CatalogExercise(
+            name=row["name"],
+            modality=row["modality"],
+            movement_pattern=row["movement_pattern"],
+            load_type=row["load_type"],
+            pattern_family=row.get("pattern_family"),
+            equipment_required=tuple(row.get("equipment_required") or ()),
+            sport_domains=tuple(row.get("sport_domains") or ()),
+            weak_point_tags=tuple(row.get("weak_point_tags") or ()),
+            skill_demand=row.get("skill_demand") or 0.5,
+            e1rm_benchmark_code=row.get("e1rm_benchmark_code"),
+        )
+        for row in list(EXERCISES) + list(bulk_exercises())
+    ]
+
+
+@pytest_asyncio.fixture(loop_scope="function")
+async def seeded_exercise_catalog(async_db: AsyncSession) -> None:
+    """Populate the movement catalog for tests that exercise prescription.
+
+    Exercise selection resolves template slots against this table (ADR-0016), so a test that
+    prescribes a session against an EMPTY catalog silently falls back to the equipment map and
+    proves nothing about selection. Production always has the catalog — `seed_catalog` runs on
+    every container boot — so seeding it here is faithful rather than convenient.
+
+    Opt-in rather than autouse: several tests assert on catalog row counts and would break if
+    181 rows appeared underneath them.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    from app.scripts import seed_exercises
+
+    factory = async_sessionmaker(async_db.bind, expire_on_commit=False)
+    original = seed_exercises.AsyncSessionLocal
+    seed_exercises.AsyncSessionLocal = factory  # type: ignore[assignment]
+    try:
+        await seed_exercises.seed()
+    finally:
+        seed_exercises.AsyncSessionLocal = original  # type: ignore[assignment]
+    await async_db.rollback()
+
+
 @pytest_asyncio.fixture(loop_scope="function")
 async def http_client(async_db: AsyncSession) -> httpx.AsyncClient:
     """Async HTTP client wired to the FastAPI app with the test DB session injected.
