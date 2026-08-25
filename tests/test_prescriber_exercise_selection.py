@@ -3,7 +3,7 @@
 Bug: recommend_next_session correctly picks a goal-specific CandidateTemplate,
 but finalization overwrote rx.exercises from an equipment-only map, so a
 Powerlifting athlete with no equipment configured got the bodyweight default
-(Tempo Squat / Push-Up / Split Squat) instead of SBD work. Templates now carry
+(Tempo Back Squat / Push-up / Split Squat) instead of SBD work. Templates now carry
 structured exercise_slots that finalization prefers over the equipment map;
 empty slots must still fall back to the equipment map exactly as before.
 """
@@ -11,6 +11,7 @@ empty slots must still fall back to the equipment map exactly as before.
 from datetime import UTC, datetime
 
 from app.engine.state_bridge import sync_legacy_from_vectors
+from app.logic.exercise_slot import ExerciseSlot
 from app.logic.prescriber import (
     _exercise_list_for_candidate,
     _exercise_list_for_equipment,
@@ -42,19 +43,20 @@ def _neutral_state(*, muscular: float = 0.0) -> UnifiedStateVector:
     )
 
 
-def test_powerlifting_prescription_returns_sbd_not_bodyweight():
+def test_powerlifting_prescription_returns_sbd_not_bodyweight(catalog_snapshot):
     rx = recommend_next_session(
         _neutral_state(), goal="Powerlifting", available_equipment=None,
+        catalog=catalog_snapshot,
     )
     names = [e.name for e in rx.exercises]
     joined = " ".join(names)
     assert any(m in joined for m in ("Squat", "Bench", "Deadlift")), names
-    assert "Push-Up" not in names
+    assert "Push-up" not in names
     assert "Split Squat" not in names
-    assert "Tempo Squat" not in names
+    assert "Tempo Back Squat (3-0-1)" not in names
 
 
-def test_empty_slots_falls_back_to_equipment_map():
+def test_empty_slots_falls_back_to_equipment_map(catalog_snapshot):
     """A template with empty exercise_slots must preserve today's exact
     equipment-fallback behavior (the guard added in Task 0.B)."""
     fallback = _exercise_list_for_equipment(None)
@@ -66,13 +68,36 @@ def test_empty_slots_falls_back_to_equipment_map():
     assert [e.model_dump() for e in guarded_barbell] == [e.model_dump() for e in fallback_barbell]
 
 
-def test_nonempty_slots_take_precedence_over_equipment_map():
-    slots = [("Back Squat", "4", "3-5"), ("Bench Press", "4", "3-5")]
-    guarded = _exercise_list_for_candidate(slots, ["barbell"])
+def test_resolved_slots_take_precedence_over_equipment_map(catalog_snapshot):
+    """A template with slots resolves them against the catalog and never touches the fallback.
+
+    Both slots pin by benchmark code, so this also pins that a pinned competition lift is
+    returned exactly — not a metadata-equivalent squat or press.
+    """
+    slots = [
+        ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_squat"),
+        ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_bench"),
+    ]
+
+    guarded = _exercise_list_for_candidate(slots, ["barbell"], catalog_snapshot)
+
     assert [e.name for e in guarded] == ["Back Squat", "Bench Press"]
 
 
-def test_empty_slot_template_reaches_equipment_map_end_to_end():
+def test_slots_fall_back_to_the_equipment_map_without_a_catalog(catalog_snapshot):
+    """No catalog (a pure-logic caller, or an unseeded database) must still yield a session.
+
+    Degrading to the equipment map is the honest behaviour — returning nothing would hand the
+    athlete an empty workout.
+    """
+    slots = [ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_squat")]
+
+    out = _exercise_list_for_candidate(slots, ["barbell"], None)
+
+    assert out, "a missing catalog must not produce an empty session"
+
+
+def test_empty_slot_template_reaches_equipment_map_end_to_end(catalog_snapshot):
     """Full-stack guard: a real winning template with EMPTY exercise_slots must
     reach the equipment map through the whole recommend_next_session pipeline
     (scoring -> sort -> finalize -> exercise selection), not just via the
@@ -86,9 +111,10 @@ def test_empty_slot_template_reaches_equipment_map_end_to_end():
     s = _neutral_state(muscular=70.0)
     rx = recommend_next_session(
         s, goal="Hypertrophy", available_equipment=["barbell", "pullup_bar"],
+        catalog=catalog_snapshot,
     )
     assert rx.type == "Maintenance Volume"  # hyp_maintenance won (slot-less)
     names = [e.name for e in rx.exercises]
     # Names come from _EQUIPMENT_EXERCISE_MAP["barbell"] + ["pullup_bar"], not slots.
     assert "Back Squat" in names
-    assert "Pull-Up" in names
+    assert "Pull-up" in names

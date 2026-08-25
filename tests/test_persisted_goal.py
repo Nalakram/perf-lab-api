@@ -64,9 +64,7 @@ async def test_patch_profile_primary_goal_roundtrip(http_client: AsyncClient):
     assert get.json()["primary_goal"] == "Running"
 
 
-async def test_next_session_uses_persisted_goal_with_no_query_param(
-    http_client: AsyncClient,
-):
+async def test_next_session_uses_persisted_goal_with_no_query_param(http_client: AsyncClient, seeded_exercise_catalog):
     """
     With a persisted primary_goal and no active block, GET /next-session with
     NO goal query param must prescribe for the stored goal, not the hardcoded
@@ -95,6 +93,6 @@ async def test_next_session_uses_persisted_goal_with_no_query_param(
     names = [e["name"] for e in data["exercises"]]
     joined = " ".join(names)
     assert any(m in joined for m in ("Squat", "Bench", "Deadlift")), names
-    assert "Push-Up" not in names
+    assert "Push-up" not in names
     assert "Split Squat" not in names
-    assert "Tempo Squat" not in names
+    assert "Tempo Back Squat (3-0-1)" not in names

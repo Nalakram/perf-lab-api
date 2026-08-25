@@ -26,6 +26,7 @@ from app.logic.constraint_engine.candidate import (
     mean_fatigue,
     overall_readiness,
 )
+from app.logic.exercise_slot import ExerciseSlot
 from app.schemas.state import UnifiedStateVector
 
 # ---------------------------------------------------------------------------
@@ -76,11 +77,16 @@ class CandidateTemplate:
     domain :
         Used by score_template() to dispatch to the right per-domain scorer.
     exercise_slots :
-        Structured (name, sets, reps) movements for this template — the same
-        shape prescriber._EQUIPMENT_EXERCISE_MAP values use, so finalization
-        can build ExercisePrescription entries directly from a chosen template
-        instead of falling back to the equipment-only map. Empty (default)
-        preserves today's equipment-fallback behavior exactly.
+        What each movement in this session must BE, not which one it is
+        (ADR-0016). Each slot states requirements — movement pattern, load
+        type, skill ceiling, sport domain — and the catalog is searched at
+        prescribe time for the best match the athlete can actually perform
+        with their equipment, biased toward their flagged weak points.
+
+        Competition lifts pin via ``e1rm_code``: a powerlifter's squat is not
+        interchangeable with any other squat-pattern barbell movement, so
+        those slots name the benchmark rather than the shape. Everything else
+        resolves. Empty (default) still falls back to the equipment map.
     kpi_eligible :
         Predicate over the KPI dict.  ``None`` → always eligible.
     state_eligible :
@@ -103,8 +109,8 @@ class CandidateTemplate:
     # Dynamic scoring. When set, score_template() uses this instead of the
     # per-domain scorer dispatch. Domains are migrated onto it incrementally.
     scoring: ScoringSpec | None = None
-    # Structured (name, sets, reps) movements — see class docstring.
-    exercise_slots: list[tuple[str, str, str]] = field(default_factory=lambda: [])
+    # Requirement-based movement slots — see class docstring.
+    exercise_slots: list[ExerciseSlot] = field(default_factory=lambda: [])
 
 
 # ---------------------------------------------------------------------------
@@ -160,8 +166,11 @@ STRENGTH_TEMPLATES: list[CandidateTemplate] = [
         tags=["squat_pattern", "hip_hinge"],
         domain="strength",
         exercise_slots=[
-            ("Back Squat", "5", "3"),
-            ("Romanian Deadlift", "3", "5"),
+            ExerciseSlot(sets="5", reps="3", movement_pattern="squat", load_type="barbell",
+                         modality="Strength", skill_target=0.70,
+                         prefer_tags=("squat_pattern",)),
+            ExerciseSlot(sets="3", reps="5", movement_pattern="hinge", load_type="barbell",
+                         prefer_tags=("posterior_chain",)),
         ],
         scoring=ScoringSpec(
             state_fit=lambda s, r: r * (s.capacity_x.max_strength / 100.0 + 0.3),
@@ -236,9 +245,9 @@ HYPERTROPHY_TEMPLATES: list[CandidateTemplate] = [
         tags=["anterior_chain", "posterior_chain"],
         domain="hypertrophy",
         exercise_slots=[
-            ("Leg Press", "4", "12"),
-            ("Hack Squat", "3", "15"),
-            ("Leg Curl", "3", "12"),
+            ExerciseSlot(sets="4", reps="12", movement_pattern="squat", modality="Hypertrophy"),
+            ExerciseSlot(sets="3", reps="15", movement_pattern="squat", modality="Hypertrophy"),
+            ExerciseSlot(sets="3", reps="12", movement_pattern="hinge", modality="Hypertrophy"),
         ],
     ),
     CandidateTemplate(
@@ -264,8 +273,8 @@ POWER_TEMPLATES: list[CandidateTemplate] = [
         tags=["hip_hinge"],
         domain="power",
         exercise_slots=[
-            ("Hang Power Clean", "5", "3"),
-            ("Box Jump", "4", "4"),
+            ExerciseSlot(sets="5", reps="3", movement_pattern="hinge", modality="Power", load_type="barbell"),
+            ExerciseSlot(sets="4", reps="4", movement_pattern="jump", modality="Power"),
         ],
     ),
     CandidateTemplate(
@@ -292,8 +301,12 @@ OLYMPIC_TEMPLATES: list[CandidateTemplate] = [
         tags=["olympic_lifting"],
         domain="weightlifting",
         exercise_slots=[
-            ("Snatch Complex", "5", "2"),
-            ("Power Snatch", "5", "2"),
+            ExerciseSlot(sets="5", reps="2", modality="Power", load_type="barbell",
+                         movement_pattern="mixed", sport_domain="weightlifting",
+                         prefer_tags=("power",)),
+            ExerciseSlot(sets="5", reps="2", modality="Power", load_type="barbell",
+                         movement_pattern="mixed", sport_domain="weightlifting",
+                         prefer_tags=("power",)),
         ],
         kpi_eligible=lambda kpi: (
             kpi.get("wl_snatch_cj_ratio") is not None
@@ -310,8 +323,11 @@ OLYMPIC_TEMPLATES: list[CandidateTemplate] = [
         tags=["olympic_lifting"],
         domain="weightlifting",
         exercise_slots=[
-            ("Clean & Jerk", "5", "2"),
-            ("Hang Clean", "4", "3"),
+            ExerciseSlot(sets="5", reps="2", modality="Power", load_type="barbell",
+                         movement_pattern="mixed", sport_domain="weightlifting",
+                         prefer_tags=("power",)),
+            ExerciseSlot(sets="4", reps="3", modality="Power", load_type="barbell",
+                         movement_pattern="mixed", sport_domain="weightlifting"),
         ],
         kpi_eligible=lambda kpi: not (
             kpi.get("wl_snatch_cj_ratio") is not None
@@ -342,10 +358,10 @@ POWERLIFTING_TEMPLATES: list[CandidateTemplate] = [
         tags=["squat_pattern", "hip_hinge", "push_horizontal"],
         domain="powerlifting",
         exercise_slots=[
-            ("Back Squat", "4", "3-5"),
-            ("Bench Press", "4", "3-5"),
-            ("Deadlift", "2", "3-5"),
-            ("Back-off Squat", "3", "6-8"),
+            ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_squat"),
+            ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_bench"),
+            ExerciseSlot(sets="2", reps="3-5", e1rm_code="pl_e1rm_deadlift"),
+            ExerciseSlot(sets="3", reps="6-8", e1rm_code="pl_e1rm_squat", allow_repeat=True),
         ],
         kpi_eligible=lambda kpi: (
             kpi.get("pl_relative_total") is not None
@@ -362,10 +378,10 @@ POWERLIFTING_TEMPLATES: list[CandidateTemplate] = [
         tags=["squat_pattern", "hip_hinge", "push_horizontal"],
         domain="powerlifting",
         exercise_slots=[
-            ("Back Squat", "4", "3-5"),
-            ("Bench Press", "4", "3-5"),
-            ("Deadlift", "2", "3-5"),
-            ("Back-off Squat", "3", "6-8"),
+            ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_squat"),
+            ExerciseSlot(sets="4", reps="3-5", e1rm_code="pl_e1rm_bench"),
+            ExerciseSlot(sets="2", reps="3-5", e1rm_code="pl_e1rm_deadlift"),
+            ExerciseSlot(sets="3", reps="6-8", e1rm_code="pl_e1rm_squat", allow_repeat=True),
         ],
         kpi_eligible=lambda kpi: not (
             kpi.get("pl_relative_total") is not None
@@ -382,9 +398,10 @@ POWERLIFTING_TEMPLATES: list[CandidateTemplate] = [
         tags=["squat_pattern", "push_horizontal", "hip_hinge"],
         domain="powerlifting",
         exercise_slots=[
-            ("Paused Squat", "3", "4"),
-            ("Close-Grip Bench", "3", "6"),
-            ("Romanian Deadlift", "3", "6"),
+            ExerciseSlot(sets="3", reps="4", movement_pattern="squat", load_type="barbell", modality="Strength"),
+            ExerciseSlot(sets="3", reps="6", movement_pattern="push_horizontal", load_type="barbell"),
+            ExerciseSlot(sets="3", reps="6", movement_pattern="hinge", load_type="barbell",
+                         prefer_tags=("posterior_chain",)),
         ],
     ),
 ]
@@ -400,9 +417,11 @@ METCON_TEMPLATES: list[CandidateTemplate] = [
         tags=["work_capacity", "aerobic_base"],
         domain="mixed",
         exercise_slots=[
-            ("Row Intervals", "5", "2 min @ sustainable pace"),
-            ("Bike Intervals", "5", "2 min @ sustainable pace"),
-            ("KB Swings", "4", "20 reps"),
+            ExerciseSlot(sets="5", reps="2 min @ sustainable pace", movement_pattern="row",
+                         modality="Conditioning"),
+            ExerciseSlot(sets="5", reps="2 min @ sustainable pace", movement_pattern="bike",
+                         modality="Conditioning"),
+            ExerciseSlot(sets="4", reps="20 reps", movement_pattern="hinge", load_type="kettlebell"),
         ],
     ),
     CandidateTemplate(
@@ -445,7 +464,8 @@ RUNNING_BASE_TEMPLATES: list[CandidateTemplate] = [
         tags=["aerobic_base", "running_economy"],
         domain="running",
         exercise_slots=[
-            ("Zone 2 Run", "1", "30-40 min conversational pace"),
+            ExerciseSlot(sets="1", reps="30-40 min conversational pace", movement_pattern="run",
+                         modality="Running"),
         ],
         kpi_eligible=lambda kpi: (kpi.get("run_fatigue_factor") or 0.0) > 14.0,
     ),
@@ -459,7 +479,8 @@ RUNNING_BASE_TEMPLATES: list[CandidateTemplate] = [
         tags=["aerobic_base", "running_economy"],
         domain="running",
         exercise_slots=[
-            ("Zone 2 Run", "1", "30-40 min conversational pace"),
+            ExerciseSlot(sets="1", reps="30-40 min conversational pace", movement_pattern="run",
+                         modality="Running"),
         ],
         kpi_eligible=lambda kpi: not ((kpi.get("run_fatigue_factor") or 0.0) > 14.0),
     ),
@@ -499,8 +520,8 @@ SPRINTING_TEMPLATES: list[CandidateTemplate] = [
         tags=["running_economy"],
         domain="running",
         exercise_slots=[
-            ("Acceleration Sprints", "3", "30m"),
-            ("Max-Velocity Flys", "4", "20m"),
+            ExerciseSlot(sets="3", reps="30m", movement_pattern="run", modality="Power"),
+            ExerciseSlot(sets="4", reps="20m", movement_pattern="run", modality="Power"),
         ],
     ),
 ]
@@ -516,8 +537,10 @@ GYMNASTICS_TEMPLATES: list[CandidateTemplate] = [
         tags=["gymnastics_skill", "overhead_stability"],
         domain="gymnastics",
         exercise_slots=[
-            ("Handstand Hold", "4", "20-30s"),
-            ("Ring Support Hold", "3", "20-30s"),
+            ExerciseSlot(sets="4", reps="20-30s", movement_pattern="push_vertical",
+                         modality="Calisthenics", load_type="time"),
+            ExerciseSlot(sets="3", reps="20-30s", movement_pattern="push_vertical",
+                         modality="Calisthenics", load_type="time"),
         ],
     ),
 ]
@@ -543,9 +566,11 @@ CALISTHENICS_TEMPLATES: list[CandidateTemplate] = [
         tags=["pull_vertical", "push_vertical"],
         domain="calisthenics",
         exercise_slots=[
-            ("Pull-Up", "4", "6-10"),
-            ("Dip", "3", "8-12"),
-            ("Push-Up Variation", "3", "10-15"),
+            ExerciseSlot(sets="4", reps="6-10", movement_pattern="pull_vertical",
+                         modality="Calisthenics", skill_target=0.50),
+            ExerciseSlot(sets="3", reps="8-12", movement_pattern="push_horizontal", modality="Calisthenics"),
+            ExerciseSlot(sets="3", reps="10-15", movement_pattern="push_horizontal",
+                         modality="Calisthenics", load_type="bodyweight"),
         ],
     ),
 ]
@@ -561,8 +586,8 @@ GRIP_TEMPLATES: list[CandidateTemplate] = [
         tags=["grip"],
         domain="grip",
         exercise_slots=[
-            ("Farmer Carry", "4", "40m"),
-            ("Dead Hang", "4", "30-45s"),
+            ExerciseSlot(sets="4", reps="40m", movement_pattern="carry", prefer_tags=("grip",)),
+            ExerciseSlot(sets="4", reps="30-45s", movement_pattern="pull_vertical", load_type="time"),
         ],
     ),
     CandidateTemplate(
@@ -588,10 +613,13 @@ GENERAL_TEMPLATES: list[CandidateTemplate] = [
         tags=[],
         domain="general",
         exercise_slots=[
-            ("Goblet Squat", "3", "10"),
-            ("Pull-Up", "3", "8"),
-            ("Push-Up", "3", "12"),
-            ("Farmer Carry", "2", "40m"),
+            ExerciseSlot(sets="3", reps="10", movement_pattern="squat", max_skill_demand=0.45, skill_target=0.30),
+            ExerciseSlot(sets="3", reps="8", movement_pattern="pull_vertical",
+                         modality="Calisthenics", skill_target=0.50),
+            ExerciseSlot(sets="3", reps="12", movement_pattern="push_horizontal",
+                         modality="Calisthenics", load_type="bodyweight"),
+            ExerciseSlot(sets="2", reps="40m", movement_pattern="carry",
+                         prefer_tags=("carry",)),
         ],
     ),
 ]

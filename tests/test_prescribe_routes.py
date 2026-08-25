@@ -89,7 +89,7 @@ async def test_next_session_auto_inits_state(http_client):
 # points — i.e. goal is the only thing varying. They fail if goal dispatch is ignored,
 # collapses to a default, or degenerates to an empty session.
 
-async def test_next_session_goal_strength(http_client):
+async def test_next_session_goal_strength(http_client, seeded_exercise_catalog):
     data = await _prescribe(http_client, "strength_goal@test.com", "Strength")
 
     assert data["type"] == "Max Strength"
@@ -97,7 +97,7 @@ async def test_next_session_goal_strength(http_client):
     assert "strength" in data["rationale"].lower()
 
 
-async def test_next_session_goal_hypertrophy(http_client):
+async def test_next_session_goal_hypertrophy(http_client, seeded_exercise_catalog):
     data = await _prescribe(http_client, "hyper_goal@test.com", "Hypertrophy")
 
     assert data["type"] == "High Volume Hypertrophy"
@@ -107,7 +107,7 @@ async def test_next_session_goal_hypertrophy(http_client):
     assert "Back Squat" not in names
 
 
-async def test_next_session_goal_power(http_client):
+async def test_next_session_goal_power(http_client, seeded_exercise_catalog):
     data = await _prescribe(http_client, "power_goal@test.com", "Power")
 
     assert data["type"] == "Power Development"
@@ -116,16 +116,16 @@ async def test_next_session_goal_power(http_client):
     assert data["duration_min"] == 50
 
 
-async def test_next_session_goal_general(http_client):
+async def test_next_session_goal_general(http_client, seeded_exercise_catalog):
     data = await _prescribe(http_client, "general_goal@test.com", "General")
 
     assert data["type"] == "General Physical Prep"
     # GPP is a full-body circuit, not a single-pattern block.
     names = _exercise_names(data)
-    assert {"Goblet Squat", "Pull-Up", "Push-Up", "Farmer Carry"} <= set(names)
+    assert {"Goblet Squat", "Pull-up", "Push-up", "Farmer Carry"} <= set(names)
 
 
-async def test_next_session_goals_do_not_collapse(http_client):
+async def test_next_session_goals_do_not_collapse(http_client, seeded_exercise_catalog):
     """Different goals must yield materially different prescriptions.
 
     The per-goal tests above pin each signature; this pins the *relationship* — if
