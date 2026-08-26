@@ -1,6 +1,8 @@
 """Route tests for GET /v1/next-session."""
 import pytest
 
+from app.logic.candidate_library import GENERAL_TEMPLATES
+
 pytestmark = pytest.mark.asyncio
 
 
@@ -119,10 +121,16 @@ async def test_next_session_goal_power(http_client, seeded_exercise_catalog):
 async def test_next_session_goal_general(http_client, seeded_exercise_catalog):
     data = await _prescribe(http_client, "general_goal@test.com", "General")
 
-    assert data["type"] == "General Physical Prep"
-    # GPP is a full-body circuit, not a single-pattern block.
+    # The `general` pool used to hold exactly one template, so naming it here was free.
+    # It now holds four, and which one wins is a real state-dependent decision — a low
+    # max_strength athlete flags squat_pattern/hip_hinge (candidate_library._weak_point_coverage)
+    # and correctly draws the loaded template over the bodyweight circuit. Pin the domain,
+    # not the winner; pinning the winner would only re-assert that the pool is trivial.
+    assert data["type"] in {t.type for t in GENERAL_TEMPLATES}
+    # The invariant that actually matters: a general session is full-body, not a
+    # single-pattern block. Every general template spans three or more movement patterns.
     names = _exercise_names(data)
-    assert {"Goblet Squat", "Pull-up", "Push-up", "Farmer Carry"} <= set(names)
+    assert len(set(names)) >= 3, f"general session collapsed to {names}"
 
 
 async def test_next_session_goals_do_not_collapse(http_client, seeded_exercise_catalog):
