@@ -377,4 +377,154 @@ def bulk_exercises() -> list[dict[str, Any]]:
     for name, mod, mp, p, s, eq, lt, sk, im, tags in rope:
         out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, sport_domains=["conditioning"]))
 
+    # Catalog gap closures — exact names the prescriber's equipment/accessory fallback
+    # emits (tests/test_prescribed_exercise_names_resolve.py::KNOWN_CATALOG_GAPS).
+    gap_fill: list[_VariantRow] = [
+        ("Chest-Supported Row", "Hypertrophy", "pull_horizontal", ["upper_back", "lats"], ["biceps"], ["dumbbells"], "dumbbell", 0.25, 0.25, ["pull_horizontal"]),
+        ("DB Floor Press", "Hypertrophy", "push_horizontal", ["pecs", "triceps"], ["front_delts"], ["dumbbells"], "dumbbell", 0.42, 0.35, ["push_horizontal"]),
+        ("DB RDL", "Hypertrophy", "hinge", ["hamstrings", "glutes"], ["erectors"], ["dumbbells"], "dumbbell", 0.45, 0.45, ["hip_hinge", "posterior_chain"]),
+        ("Dips", "Calisthenics", "push_horizontal", ["pecs", "triceps"], ["shoulders"], ["parallettes"], "bodyweight", 0.4, 0.3, ["push_horizontal"]),
+        ("Hanging Knee Raise", "Calisthenics", "core", ["core", "hip_flexors"], [], ["pullup_bar"], "bodyweight", 0.3, 0.2, ["core_stability"]),
+        ("Hanging Leg Raise", "Calisthenics", "core", ["core", "hip_flexors"], ["lats"], ["pullup_bar"], "bodyweight", 0.45, 0.25, ["core_stability"]),
+        ("Split Squat", "Hypertrophy", "single_leg", ["quads", "glutes"], ["hamstrings"], ["dumbbells"], "dumbbell", 0.4, 0.4, ["single_leg", "anterior_chain"], False, None, True),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, *rest in gap_fill:
+        bm = rest[0] if len(rest) > 0 else False
+        notes = rest[1] if len(rest) > 1 else None
+        uni = rest[2] if len(rest) > 2 else False
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, benchmark=bm, notes=notes, unilateral=uni))
+
+    # Pattern-breadth deepening — pull_horizontal, single_leg, carry, core/rotation and
+    # push_vertical are thin relative to squat/hinge coverage across the rest of the catalog.
+    pull_horizontal_extra: list[_VariantRow] = [
+        ("Seal Row", "Strength", "pull_horizontal", ["upper_back", "lats"], ["biceps"], ["barbell"], "barbell", 0.45, 0.35, ["pull_horizontal", "posterior_chain"]),
+        ("Meadows Row", "Strength", "pull_horizontal", ["lats", "upper_back"], ["biceps"], ["barbell"], "barbell", 0.5, 0.4, ["pull_horizontal"], True),
+        ("Chest-Supported T-Bar Row", "Strength", "pull_horizontal", ["upper_back", "lats"], ["biceps"], ["barbell"], "barbell", 0.4, 0.35, ["pull_horizontal"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, *rest in pull_horizontal_extra:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=bool(rest and rest[0])))
+
+    single_leg_extra: list[_BaseRow] = [
+        ("Reverse Lunge", "Hypertrophy", "single_leg", ["quads", "glutes"], ["hamstrings"], ["dumbbells"], "dumbbell", 0.35, 0.4, ["single_leg"]),
+        ("Lateral Lunge", "Strength", "single_leg", ["adductors", "quads"], ["glutes"], ["dumbbells"], "dumbbell", 0.45, 0.4, ["single_leg", "hip_mobility"]),
+        ("Single-Leg Box Squat", "Strength", "single_leg", ["quads", "glutes"], ["core"], ["box"], "bodyweight", 0.65, 0.4, ["single_leg", "knee_stability"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags in single_leg_extra:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=True))
+
+    carry_extra: list[_BaseRow] = [
+        ("Single-Arm Farmer Carry", "Strength", "carry", ["grip", "core"], ["traps"], ["dumbbells"], "dumbbell", 0.4, 0.45, ["carry", "grip", "rotation", "core_stability"]),
+        ("Overhead Kettlebell Carry", "Strength", "carry", ["shoulders", "core"], ["traps"], ["kettlebell"], "kettlebell", 0.55, 0.4, ["carry", "overhead_stability", "core_stability"]),
+        ("Zercher Carry", "Strength", "carry", ["core", "erectors"], ["biceps"], ["barbell"], "barbell", 0.5, 0.5, ["carry", "core_stability", "bracing"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags in carry_extra:
+        uni = name in {"Single-Arm Farmer Carry", "Overhead Kettlebell Carry"}
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=uni))
+
+    core_rotation_extra: list[_BaseRow] = [
+        ("Cable Woodchop", "Strength", "core", ["core"], ["shoulders"], ["cable"], "cable", 0.4, 0.25, ["core_stability", "rotation"]),
+        ("Landmine Rotation", "Strength", "core", ["core"], ["shoulders"], ["barbell"], "barbell", 0.45, 0.3, ["core_stability", "rotation"]),
+        ("Russian Twist", "Hypertrophy", "core", ["core"], [], [], "bodyweight", 0.25, 0.2, ["core_stability", "rotation"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags in core_rotation_extra:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags))
+
+    push_vertical_extra: list[_VariantRow] = [
+        ("Landmine Press", "Strength", "push_vertical", ["shoulders", "triceps"], ["core"], ["barbell"], "barbell", 0.4, 0.35, ["push_vertical"], True),
+        ("Seated Dumbbell Shoulder Press", "Hypertrophy", "push_vertical", ["shoulders", "triceps"], [], ["dumbbells"], "dumbbell", 0.35, 0.3, ["push_vertical"]),
+        ("Bottoms-Up Kettlebell Press", "Strength", "push_vertical", ["shoulders", "forearms"], ["core"], ["kettlebell"], "kettlebell", 0.65, 0.35, ["push_vertical", "overhead_stability", "grip"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, *rest in push_vertical_extra:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=bool(rest and rest[0])))
+
+    # Evox movement-vocabulary expansion — endurance, gymnastics, Olympic, cardio
+    # and strength movements verified absent against
+    # https://www.getevox.fit/standards/movements (scraped 2026-08-26). A movement
+    # already present under a different name (e.g. Evox "Deadlift" ==
+    # "Conventional Deadlift", Evox "Strict Press" == "Overhead Press") was
+    # skipped rather than duplicated.
+    endurance_vocab: list[_VariantRow] = [
+        ("Bike Erg", "Conditioning", "bike", ["legs", "arms"], [], ["bike"], "distance", 0.15, 0.25, ["aerobic_base", "work_capacity"], []),
+        ("Swim", "Conditioning", "row", ["lats", "shoulders"], ["legs", "core"], [], "distance", 0.5, 0.25, ["aerobic_base", "work_capacity"], []),
+        ("Sprint", "Running", "run", ["quads", "glutes", "calves"], [], [], "distance", 0.35, 0.75, ["anaerobic_capacity", "running_economy"], ["running"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, sd in endurance_vocab:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, sport_domains=sd))
+
+    gymnastics_vocab: list[_BaseRow] = [
+        ("Air Squat", "Calisthenics", "squat", ["quads", "glutes"], [], [], "bodyweight", 0.15, 0.3, ["squat_pattern"]),
+        ("Butterfly Pull-up", "Calisthenics", "pull_vertical", ["lats", "biceps"], ["core"], ["pullup_bar"], "bodyweight", 0.55, 0.35, ["pull_vertical", "kip_efficiency", "gymnastics_skill"]),
+        ("Kipping Pull-up", "Calisthenics", "pull_vertical", ["lats", "biceps"], ["core"], ["pullup_bar"], "bodyweight", 0.45, 0.3, ["pull_vertical", "kip_efficiency"]),
+        ("L-sit Pull-up", "Calisthenics", "pull_vertical", ["lats", "core"], ["biceps"], ["pullup_bar"], "bodyweight", 0.85, 0.35, ["pull_vertical", "core_stability", "gymnastics_skill"]),
+        ("Deficit Handstand Push-up", "Calisthenics", "push_vertical", ["shoulders", "triceps"], ["core"], ["box"], "bodyweight", 0.95, 0.4, ["push_vertical", "overhead_stability", "handstand_line"]),
+        ("Kipping Handstand Push-up", "Calisthenics", "push_vertical", ["shoulders", "triceps"], ["core"], [], "bodyweight", 0.75, 0.45, ["push_vertical", "kip_efficiency", "handstand_line"]),
+        ("Handstand Walk", "Calisthenics", "push_vertical", ["shoulders", "core"], [], [], "bodyweight", 0.85, 0.35, ["handstand_line", "overhead_stability", "gymnastics_skill"]),
+        ("Legless Rope Climb", "Calisthenics", "pull_vertical", ["lats", "grip"], ["core"], ["rope"], "bodyweight", 0.9, 0.5, ["grip", "gymnastics_skill", "pull_vertical"]),
+        ("Ring Row", "Calisthenics", "pull_horizontal", ["upper_back", "lats"], ["biceps"], ["rings"], "bodyweight", 0.25, 0.2, ["pull_horizontal"]),
+        ("Knees to Elbow", "Calisthenics", "core", ["core", "hip_flexors"], ["lats"], ["pullup_bar"], "bodyweight", 0.5, 0.25, ["core_stability", "gymnastics_skill"]),
+        ("V-up", "Calisthenics", "core", ["core", "hip_flexors"], [], [], "bodyweight", 0.35, 0.15, ["core_stability"]),
+        ("Parallette Hold", "Calisthenics", "push_vertical", ["shoulders", "triceps"], ["core"], ["parallettes"], "time", 0.4, 0.15, ["core_stability", "gymnastics_skill"]),
+        ("Weighted Dip", "Calisthenics", "push_horizontal", ["pecs", "triceps"], ["shoulders"], ["parallettes", "plates"], "bodyweight", 0.55, 0.35, ["push_horizontal"]),
+        ("Diamond Push-up", "Calisthenics", "push_horizontal", ["triceps", "pecs"], ["shoulders"], [], "bodyweight", 0.35, 0.2, ["push_horizontal"]),
+        ("Hand Release Push-up", "Calisthenics", "push_horizontal", ["pecs", "triceps"], ["core"], [], "bodyweight", 0.25, 0.2, ["push_horizontal"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags in gymnastics_vocab:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, sport_domains=["gymnastics"]))
+
+    olympic_vocab: list[_VariantRow] = [
+        ("American Kettlebell Swing", "Power", "hinge", ["hips", "shoulders"], ["core"], ["kettlebell"], "kettlebell", 0.65, 0.65, ["hip_hinge", "overhead_stability", "power"], ["conditioning"]),
+        ("Russian Kettlebell Swing", "Power", "hinge", ["glutes", "hamstrings"], ["core"], ["kettlebell"], "kettlebell", 0.55, 0.55, ["hip_hinge", "posterior_chain"], ["conditioning"]),
+        ("Cluster", "Power", "mixed", ["quads", "shoulders", "hips"], ["core"], ["barbell"], "barbell", 0.88, 0.65, ["weightlifting", "power", "work_capacity"], ["crossfit"]),
+        ("Dumbbell Clean & Jerk", "Power", "mixed", ["hips", "shoulders"], ["core"], ["dumbbells"], "dumbbell", 0.75, 0.55, ["weightlifting", "power", "hip_hinge", "overhead_stability"], ["crossfit"]),
+        ("Dumbbell Hang Clean", "Power", "hinge", ["hips", "traps"], ["core"], ["dumbbells"], "dumbbell", 0.68, 0.5, ["hip_hinge", "power"], ["crossfit"]),
+        ("Ground-to-Overhead", "Power", "mixed", ["hips", "shoulders", "legs"], ["core"], ["barbell"], "barbell", 0.85, 0.65, ["weightlifting", "power", "work_capacity"], ["crossfit"]),
+        ("Hang Power Snatch", "Power", "mixed", ["hips", "shoulders"], ["core"], ["barbell"], "barbell", 0.78, 0.55, ["weightlifting", "transition_skill"], ["weightlifting"]),
+        ("Jerk", "Power", "push_vertical", ["shoulders", "legs"], ["core"], ["barbell"], "barbell", 0.82, 0.55, ["weightlifting", "olympic_lifting", "overhead_stability"], ["weightlifting"]),
+        ("Kettlebell Clean", "Power", "hinge", ["hips", "traps"], ["core"], ["kettlebell"], "kettlebell", 0.55, 0.45, ["hip_hinge", "power"], ["conditioning"]),
+        ("Medicine Ball Clean", "Power", "hinge", ["hips", "back"], ["core"], ["wall_ball"], "reps", 0.35, 0.35, ["hip_hinge", "power"], []),
+        ("Squat Clean", "Power", "mixed", ["hips", "back", "legs"], ["core", "traps"], ["barbell"], "barbell", 0.93, 0.65, ["weightlifting", "power", "hip_hinge"], ["weightlifting"]),
+        ("Thruster", "Mixed", "squat", ["quads", "shoulders"], ["core"], ["barbell"], "barbell", 0.65, 0.55, ["work_capacity", "squat_pattern", "push_vertical"], ["crossfit"]),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, sd in olympic_vocab:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, sport_domains=sd))
+
+    cardio_vocab: list[_VariantRow] = [
+        ("Abmat Sit-up", "Calisthenics", "core", ["core", "hip_flexors"], [], [], "bodyweight", 0.2, 0.15, ["core_stability"], []),
+        ("Sit-up", "Calisthenics", "core", ["core", "hip_flexors"], [], [], "bodyweight", 0.15, 0.15, ["core_stability"], []),
+        ("Bar Facing Burpee", "Conditioning", "mixed", ["full_body"], [], [], "reps", 0.4, 0.55, ["work_capacity", "aerobic_base"], ["crossfit"]),
+        ("Burpee Box Jump Over", "Conditioning", "mixed", ["full_body"], [], ["box"], "reps", 0.5, 0.65, ["work_capacity"], ["crossfit"]),
+        ("Burpee Broad Jump", "Conditioning", "mixed", ["full_body"], [], [], "reps", 0.5, 0.6, ["work_capacity", "plyometric"], ["crossfit"]),
+        ("Burpee Pull-up", "Conditioning", "mixed", ["full_body"], ["lats"], ["pullup_bar"], "reps", 0.45, 0.55, ["work_capacity"], ["crossfit"]),
+        ("Box Jump Over", "Power", "jump", ["glutes", "quads", "calves"], ["core"], ["box"], "reps", 0.55, 0.75, ["work_capacity", "plyometric"], ["crossfit"]),
+        ("Crossover", "Conditioning", "jump", ["calves", "core"], ["shoulders"], ["jump_rope"], "reps", 0.8, 0.5, ["work_capacity", "skill"], []),
+        ("Dumbbell Box Step Over", "Conditioning", "single_leg", ["quads", "glutes"], ["core"], ["dumbbells", "box"], "dumbbell", 0.4, 0.55, ["single_leg", "work_capacity"], ["crossfit"], True),
+        ("High Knees", "Conditioning", "run", ["calves", "quads"], ["core"], [], "time", 0.15, 0.4, ["aerobic_base", "running_economy"], []),
+        ("Jumping Jack", "Conditioning", "jump", ["calves", "shoulders"], ["core"], [], "time", 0.1, 0.3, ["aerobic_base"], []),
+        ("Jumping Lunges", "Power", "single_leg", ["quads", "glutes"], ["calves"], [], "reps", 0.5, 0.7, ["single_leg", "plyometric"], ["crossfit"], True),
+        ("Lateral Burpee", "Conditioning", "mixed", ["full_body"], [], [], "reps", 0.4, 0.5, ["work_capacity"], ["crossfit"]),
+        ("Med-Ball Box Step-Over", "Conditioning", "single_leg", ["quads", "glutes"], ["core"], ["wall_ball", "box"], "reps", 0.4, 0.55, ["single_leg", "work_capacity"], ["crossfit"], True),
+        ("Mountain Climber", "Conditioning", "core", ["core", "hip_flexors"], ["quads"], [], "reps", 0.2, 0.35, ["core_stability", "aerobic_base"], []),
+        ("Shuttle Run", "Running", "run", ["quads", "glutes", "calves"], [], [], "distance", 0.35, 0.7, ["running_economy", "anaerobic_capacity"], ["running"]),
+        ("Single Under", "Conditioning", "jump", ["calves"], [], ["jump_rope"], "reps", 0.15, 0.25, ["aerobic_base"], []),
+        ("Triple Under", "Conditioning", "jump", ["calves", "core"], ["shoulders"], ["jump_rope"], "reps", 0.85, 0.55, ["work_capacity", "skill"], []),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, sd, *rest in cardio_vocab:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=bool(rest and rest[0]), sport_domains=sd))
+
+    strength_vocab: list[_VariantRow] = [
+        ("Dumbbell Deadlift", "Hypertrophy", "hinge", ["hamstrings", "glutes"], ["erectors"], ["dumbbells"], "dumbbell", 0.35, 0.4, ["hip_hinge", "posterior_chain"], []),
+        ("Dumbbell Front Rack Lunge", "Strength", "single_leg", ["quads", "glutes"], ["core"], ["dumbbells"], "dumbbell", 0.5, 0.45, ["single_leg", "core_stability"], [], True),
+        ("Dumbbell Overhead Lunge", "Strength", "single_leg", ["quads", "glutes"], ["core", "shoulders"], ["dumbbells"], "dumbbell", 0.65, 0.5, ["single_leg", "overhead_stability"], [], True),
+        ("Dumbbell Shoulder to Overhead", "Strength", "push_vertical", ["shoulders", "triceps"], ["legs"], ["dumbbells"], "dumbbell", 0.45, 0.4, ["push_vertical"], []),
+        ("Lunges", "Calisthenics", "single_leg", ["quads", "glutes"], [], [], "bodyweight", 0.2, 0.3, ["single_leg"], [], True),
+        ("Lunges (Barbell)", "Strength", "single_leg", ["quads", "glutes"], ["hamstrings"], ["barbell"], "barbell", 0.5, 0.5, ["single_leg"], [], True),
+        ("Overhead Squat", "Strength", "squat", ["quads", "shoulders"], ["core"], ["barbell"], "barbell", 0.85, 0.6, ["squat_pattern", "overhead_stability"], []),
+        ("Pendlay Row", "Strength", "pull_horizontal", ["upper_back", "lats"], ["biceps", "erectors"], ["barbell"], "barbell", 0.55, 0.45, ["pull_horizontal", "posterior_chain"], []),
+        ("Sandbag Lunges", "Strength", "single_leg", ["quads", "glutes"], ["core"], ["sandbag"], "bodyweight", 0.45, 0.5, ["single_leg", "hyrox"], ["hyrox"], True),
+        ("Sumo Deadlift High Pull", "Strength", "hinge", ["hamstrings", "glutes", "traps"], ["shoulders"], ["barbell"], "barbell", 0.55, 0.55, ["hip_hinge", "posterior_chain"], []),
+        ("Wall Sit", "Strength", "squat", ["quads"], ["glutes"], [], "time", 0.15, 0.15, ["squat_pattern"], []),
+    ]
+    for name, mod, mp, p, s, eq, lt, sk, im, tags, sd, *rest in strength_vocab:
+        out.append(_row(name, mod, mp, p, s, eq, lt, sk, im, tags, unilateral=bool(rest and rest[0]), sport_domains=sd))
+
     return out

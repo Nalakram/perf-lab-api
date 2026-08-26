@@ -36,17 +36,7 @@ from app.scripts.seed_exercises import EXERCISES
 #:
 #: SHRINK-ONLY. Do not add to this list to make a failure go away — either add the exercise
 #: to the catalog, or point the template at a movement that already exists.
-KNOWN_CATALOG_GAPS: frozenset[str] = frozenset(
-    {
-        "Chest-Supported Row",   # catalog has Barbell/Dumbbell/Cable Row, not the supported variant
-        "DB Floor Press",        # catalog `Floor Press` is barbell; this slot is the dumbbell bucket
-        "DB RDL",                # catalog has barbell `Romanian Deadlift` and `Single-Leg RDL`
-        "Dips",                  # catalog has only `Ring Dip` — materially harder, not a substitute
-        "Hanging Knee Raise",    # catalog has `Hanging L-Sit` — isometric, not the dynamic raise
-        "Hanging Leg Raise",     # same
-        "Split Squat",           # catalog has `Bulgarian Split Squat` — rear-foot elevated, different
-    }
-)
+KNOWN_CATALOG_GAPS: frozenset[str] = frozenset()
 
 
 def _catalog_names() -> set[str]:
