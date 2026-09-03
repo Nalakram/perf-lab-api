@@ -12,7 +12,19 @@ import { deriveModality, groupsToSets, type SetGroup } from "./setBuilderLogic";
 // #199: the request body is built in its own fixture-free module so the static
 // reachability guard (workoutLogBoundary.test.ts) can root there. This file cannot be
 // a root — it value-imports the fixture module `../sim` for its preview chrome below.
-import { buildWorkoutLog, checkinToWorkoutWellness } from "./workoutLogBody";
+import {
+  buildWorkoutLog,
+  checkinToWorkoutWellness,
+  missingRequiredReadings,
+  type RequiredReading,
+} from "./workoutLogBody";
+
+/** How each missing reading is named to the athlete in the footer prompt. */
+const READING_LABEL: Record<RequiredReading, string> = {
+  duration: "duration",
+  effort: "perceived effort",
+  distance: "distance",
+};
 
 export function LogWorkoutModal() {
   const { state, actions } = usePerfLab();
@@ -80,7 +92,14 @@ export function LogWorkoutModal() {
     }
     let cancelled = false;
     const id = window.setTimeout(() => {
-      simulateDose(buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets))
+      // Until every required reading is entered there is no honest body to send, so
+      // the preview falls back to the sample bars rather than simulating a fiction.
+      const body = buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets);
+      if (!body) {
+        if (!cancelled) setDoseSix(null);
+        return;
+      }
+      simulateDose(body)
         .then((d) => {
           if (cancelled) return;
           const s = d.dose_six;
@@ -104,6 +123,12 @@ export function LogWorkoutModal() {
   const { scaled, readyAfter, fatAfter, capDelta, cap, zone, readyColor } = projectLogDose(state);
   const bars = doseSix ?? scaled;
 
+  // The draft opens entirely unknown, so this is non-empty until the athlete enters
+  // real readings. Signing in is still allowed while incomplete — only logging is not.
+  const missing = missingRequiredReadings(logType, rpe, durationMin, distanceKm, sets);
+  const blocked = Boolean(auth.token) && missing.length > 0;
+  const missingLabel = missing.map((m) => READING_LABEL[m]).join(" and ");
+
   // Apply → POST /v1/log-workout (auth required), cache the returned state.
   async function apply() {
     if (!auth.token) {
@@ -114,10 +139,14 @@ export function LogWorkoutModal() {
     setApplying(true);
     setApplyError(null);
     try {
-      const sv = await logWorkout(
-        buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets),
-        auth.token,
-      );
+      const body = buildWorkoutLog(logType, rpe, durationMin, distanceKm, wellness, sets);
+      if (!body) {
+        // Unreachable while the button is disabled; kept so this path can never
+        // fabricate a reading if a future caller bypasses the gate.
+        setApplyError("Enter every reading above before logging this session.");
+        return;
+      }
+      const sv = await logWorkout(body, auth.token);
       actions.cacheTwinState(sv);
       actions.applyLog();
     } catch (e) {
@@ -131,11 +160,15 @@ export function LogWorkoutModal() {
   }
 
   const onPace = (v: string) => {
+    if (v.trim() === "") return actions.setPaceSec(null);
     const m = v.match(/(\d+):(\d+)/);
     if (m) actions.setPaceSec(+m[1] * 60 + +m[2]);
     else if (!isNaN(parseFloat(v))) actions.setPaceSec(parseFloat(v));
   };
-  const num = (set: (n: number) => void) => (v: string) => {
+  // Emptying a field returns it to "not entered". It must never fall to 0, which the
+  // backend would record as a real reading of zero.
+  const num = (set: (n: number | null) => void) => (v: string) => {
+    if (v.trim() === "") return set(null);
     const n = parseFloat(v);
     if (!isNaN(n)) set(n);
   };
@@ -174,17 +207,21 @@ export function LogWorkoutModal() {
               </div>
             </div>
             <div className="grid grid-cols-2 gap-[14px]">
-              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Duration</span><input defaultValue="42 min" onChange={(e) => num(actions.setDur)(e.target.value)} className={fieldCls} /></label>
-              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Distance</span><input defaultValue="9.0 km" onChange={(e) => num(actions.setDist)(e.target.value)} className={fieldCls} /></label>
-              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Avg pace</span><input defaultValue="4:38 /km" onChange={(e) => onPace(e.target.value)} className={fieldCls} /></label>
+              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Duration</span><input placeholder="e.g. 42 min" onChange={(e) => num(actions.setDur)(e.target.value)} className={fieldCls} /></label>
+              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Distance</span><input placeholder="e.g. 9.0 km" onChange={(e) => num(actions.setDist)(e.target.value)} className={fieldCls} /></label>
+              <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Avg pace</span><input placeholder="e.g. 4:38 /km" onChange={(e) => onPace(e.target.value)} className={fieldCls} /></label>
               <label className="block"><span className="text-[12px] font-medium leading-none text-mute">Zone</span><div className="mt-2 w-full rounded-[11px] border border-ac/20 bg-ac/[0.06] px-[13px] py-[11px] font-mono text-[14px] font-semibold leading-[1.1] text-ac">{zone}</div></label>
             </div>
             <div>
               <div className="mb-[10px] flex items-center justify-between">
                 <span className="font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.14em] text-[#8b919c]">Perceived effort</span>
-                <span className="font-mono text-[14px] font-semibold leading-none text-ac">{state.rpe} <span className="text-[11px] text-dim">/ 10 RPE</span></span>
+                <span className={cn("font-mono text-[14px] font-semibold leading-none", state.rpe === null ? "text-dim" : "text-ac")}>{state.rpe ?? "—"} <span className="text-[11px] text-dim">/ 10 RPE</span></span>
               </div>
-              <input type="range" min={1} max={10} value={state.rpe} onChange={(e) => actions.setRpe(+e.target.value)} className="w-full cursor-pointer" style={{ accentColor: "var(--ac)" }} />
+              {/* A range input always renders somewhere, so an untouched slider would
+                  look like a reported 7. It shows the midpoint but reads "—" until the
+                  athlete touches it; clicking commits the displayed value, which is the
+                  explicit confirmation a drag would otherwise never produce at 7. */}
+              <input type="range" min={1} max={10} value={state.rpe ?? 7} onChange={(e) => actions.setRpe(+e.target.value)} onClick={() => { if (state.rpe === null) actions.setRpe(7); }} className="w-full cursor-pointer" style={{ accentColor: "var(--ac)" }} aria-label={state.rpe === null ? "Perceived effort — not set" : `Perceived effort ${state.rpe} of 10`} />
             </div>
 
             {/* Per-set, catalog-bound entry (ADR-0045). Optional — leaving it empty
@@ -238,13 +275,15 @@ export function LogWorkoutModal() {
         <div className="flex items-center justify-between gap-[9px] border-t border-white/[0.06] px-6 py-4">
           <span className={cn("max-w-[320px] text-[11px] font-medium leading-[1.4]", applyError ? "text-hot" : "text-dim")}>
             {applyError ??
-              (auth.token
-                ? "Applying logs the session and advances S(t) via the backend."
-                : "Sign in to log this session to your twin.")}
+              (blocked
+                ? `Enter ${missingLabel} to log this session.`
+                : auth.token
+                  ? "Applying logs the session and advances S(t) via the backend."
+                  : "Sign in to log this session to your twin.")}
           </span>
           <div className="flex flex-none gap-[9px]">
             <button onClick={actions.closeLog} className="rounded-[9px] border border-white/10 bg-white/[0.04] px-4 py-[11px] text-[12.5px] font-semibold leading-none text-soft">Cancel</button>
-            <button onClick={apply} disabled={applying} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-[18px] py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10] disabled:opacity-60">
+            <button onClick={apply} disabled={applying || blocked} className="rounded-[9px] bg-gradient-to-r from-ac to-[#a7e36e] px-[18px] py-[11px] text-[12.5px] font-semibold leading-none text-[#0a0c10] disabled:opacity-60">
               {applying ? "Applying…" : auth.token ? "Apply to twin →" : "Sign in to apply →"}
             </button>
           </div>

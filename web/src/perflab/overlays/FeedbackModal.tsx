@@ -66,9 +66,9 @@ export function FeedbackModal() {
               <div>
                 <div className="mb-[10px] flex items-center justify-between">
                   <span className="font-mono text-[11px] font-semibold uppercase leading-none tracking-[0.14em] text-[#8b919c]">Perceived effort</span>
-                  <span className="font-mono text-[14px] font-semibold leading-none text-ac">{state.rpe} <span className="text-[11px] text-dim">/ 10 RPE</span></span>
+                  <span className={cn("font-mono text-[14px] font-semibold leading-none", state.rpe === null ? "text-dim" : "text-ac")}>{state.rpe ?? "—"} <span className="text-[11px] text-dim">/ 10 RPE</span></span>
                 </div>
-                <input type="range" min={1} max={10} value={state.rpe} onChange={(e) => actions.setRpe(+e.target.value)} className="w-full cursor-pointer" style={{ accentColor: "var(--ac)" }} />
+                <input type="range" min={1} max={10} value={state.rpe ?? 7} onChange={(e) => actions.setRpe(+e.target.value)} className="w-full cursor-pointer" style={{ accentColor: "var(--ac)" }} />
               </div>
               <div className="rounded-[14px] border border-white/[0.07] bg-white/[0.02] px-[18px] py-4">
                 <div className="mb-[14px] font-mono text-[10px] font-semibold uppercase leading-none tracking-[0.14em] text-[#8b919c]">How your twin will update</div>

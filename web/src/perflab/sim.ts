@@ -249,15 +249,44 @@ export const PRESETS: Record<string, LogPreset> = {
 export const DOSE_NAMES = ["Volume", "Intensity", "Density", "Impact", "Skill", "Metabolic"];
 
 /** Project a logged session's six-axis dose and resulting S(t) shift. */
-export function projectLogDose(p: { logType: string; rpe: number; durationMin: number; distanceKm: number; paceSec: number }) {
+/**
+ * The sample readings the DOSE PREVIEW falls back to when the athlete has not
+ * entered one yet.
+ *
+ * These four numbers used to be the initial values of the live store draft, which
+ * meant an untouched Log-workout modal submitted them to `POST /v1/log-workout` as
+ * if an athlete had reported them. They belong here instead: this is the fixture
+ * module, the preview is the only thing entitled to a fixture, and
+ * `workoutLogBody.ts` — the sole builder of a real request body — cannot reach this
+ * module by value (see workoutLogBoundary.test.ts).
+ */
+export const SAMPLE_LOG_DRAFT = {
+  rpe: 7,
+  durationMin: 42,
+  distanceKm: 9,
+  paceSec: 278,
+} as const;
+
+/**
+ * Project a dose from a log draft, for PREVIEW ONLY.
+ *
+ * Accepts the draft's real "not entered yet" nulls and substitutes
+ * `SAMPLE_LOG_DRAFT` so the guest demo keeps its illustrative bars. A null here is
+ * therefore cosmetic; on the submit path the same null blocks the request entirely.
+ */
+export function projectLogDose(p: { logType: string; rpe: number | null; durationMin: number | null; distanceKm: number | null; paceSec: number | null }) {
   const P = PRESETS[p.logType] || PRESETS.tempo;
-  const f = p.rpe / 7;
+  const rpe = p.rpe ?? SAMPLE_LOG_DRAFT.rpe;
+  const durationMin = p.durationMin ?? SAMPLE_LOG_DRAFT.durationMin;
+  const distanceKm = p.distanceKm ?? SAMPLE_LOG_DRAFT.distanceKm;
+  const paceSec = p.paceSec ?? SAMPLE_LOG_DRAFT.paceSec;
+  const f = rpe / 7;
   const cl = (n: number, lo: number, hi: number) => Math.max(lo, Math.min(hi, n));
-  const paceMult = cl(290 / (p.paceSec || 290), 0.85, 1.2);
-  const volume = cl(p.durationMin / 13, 0, 10);
+  const paceMult = cl(290 / (paceSec || 290), 0.85, 1.2);
+  const volume = cl(durationMin / 13, 0, 10);
   const intensity = cl(P.dose[1] * f * paceMult, 0, 10);
   const density = cl(P.dose[2] * (0.75 + 0.25 * f), 0, 10);
-  const impact = cl(P.dose[3] * 0.4 + p.distanceKm * 0.4, 0, 10);
+  const impact = cl(P.dose[3] * 0.4 + distanceKm * 0.4, 0, 10);
   const skill = P.dose[4];
   const metabolic = cl(P.dose[5] * f, 0, 10);
   const scaled = [volume, intensity, density, impact, skill, metabolic];
