@@ -61,16 +61,24 @@ const checkin = (over: Partial<CheckinState> = {}): CheckinState => ({
 
 let storeCheckin: CheckinState = checkin();
 
+/** The four readings the athlete enters in the modal. `null` = not entered. */
+interface Draft {
+  rpe: number | null;
+  durationMin: number | null;
+  distanceKm: number | null;
+  paceSec: number | null;
+}
+/** A draft in which every required reading HAS been supplied. */
+const COMPLETE_DRAFT: Draft = { rpe: 7, durationMin: 42, distanceKm: 9, paceSec: 278 };
+let storeDraft: Draft = { ...COMPLETE_DRAFT };
+
 vi.mock("../store", () => ({
   usePerfLab: () => ({
     state: {
       logOpen: true,
       logType: "strength",
-      rpe: 7,
-      durationMin: 42,
-      distanceKm: 9,
+      ...storeDraft,
       checkin: storeCheckin,
-      paceSec: 278,
       sim: {},
     },
     actions: {
@@ -109,11 +117,22 @@ const { LogWorkoutModal } = await import("./LogWorkoutModal");
 // inversion (restore the seed) turn THIS file red.
 const realStore = await vi.importActual<typeof import("../store")>("../store");
 const REAL_INITIAL_CHECKIN = realStore.initialState().checkin;
+// Same trick for the workout-log draft. The store mock above insulates this file from
+// the real seed, so without reading it here a restored `durationMin: 42` would sail
+// through. This is the link that makes reintroducing the fixture seed turn THIS file red.
+const s0 = realStore.initialState();
+const REAL_INITIAL_DRAFT: Draft = {
+  rpe: s0.rpe,
+  durationMin: s0.durationMin,
+  distanceKm: s0.distanceKm,
+  paceSec: s0.paceSec,
+};
 
 beforeEach(() => {
   logged.length = 0;
   simulated.length = 0;
   storeCheckin = checkin();
+  storeDraft = { ...COMPLETE_DRAFT };
 });
 afterEach(cleanup);
 
@@ -186,5 +205,75 @@ describe("the object handed to logWorkout (#199)", () => {
     const b = simulated[0] as unknown as Record<string, unknown>;
     expect(hasKey(b, "sleep_quality")).toBe(false);
     expect(hasKey(b, "life_stress_inverse")).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------------
+// UNENTERED READINGS ARE NOT A WORKOUT
+//
+// The defect this pins: the log draft used to be SEEDED (rpe 7 / 42 min / 9 km), the
+// inputs were uncontrolled `defaultValue`s, and Apply was disabled only while a request
+// was in flight. A signed-in athlete could open the modal and click Apply without typing
+// anything, and a complete, plausible, entirely fictional session went to the real
+// backend and moved their twin.
+//
+// Note what does NOT catch this: every case above still passes with the defect present,
+// because they mock a store whose draft is already fully populated. Honesty about an
+// unentered value can only be tested by leaving it unentered.
+// ---------------------------------------------------------------------------------
+
+const applyBtn = () => screen.getByText(/Apply to twin/) as HTMLButtonElement;
+
+describe("an untouched draft cannot be logged", () => {
+  it("THE SEED IS GONE: the real store opens with every required reading unset", () => {
+    // Reading the REAL store, not the mock — this is the seed-inversion link.
+    expect(REAL_INITIAL_DRAFT.durationMin, "durationMin must open unentered").toBeNull();
+    expect(REAL_INITIAL_DRAFT.rpe, "rpe must open unentered").toBeNull();
+    expect(REAL_INITIAL_DRAFT.distanceKm, "distanceKm must open unentered").toBeNull();
+    expect(REAL_INITIAL_DRAFT.paceSec, "paceSec must open unentered").toBeNull();
+  });
+
+  it("APPLY IS DISABLED and no request is made from the real initial draft", async () => {
+    storeDraft = { ...REAL_INITIAL_DRAFT };
+    render(<LogWorkoutModal />);
+    expect(applyBtn().disabled, "Apply must be disabled while readings are unentered").toBe(true);
+    fireEvent.click(applyBtn());
+    // Give any errant async submit a turn of the loop to land.
+    await new Promise((r) => setTimeout(r, 0));
+    expect(logged.length, "no workout may be logged from an untouched modal").toBe(0);
+  });
+
+  it("nothing is SIMULATED from an untouched draft either", async () => {
+    storeDraft = { ...REAL_INITIAL_DRAFT };
+    render(<LogWorkoutModal />);
+    await new Promise((r) => setTimeout(r, 400)); // past the 350ms preview debounce
+    expect(simulated.length, "the preview must not simulate a fictional session").toBe(0);
+  });
+
+  it("says WHICH readings are missing, by name", () => {
+    storeDraft = { ...REAL_INITIAL_DRAFT };
+    render(<LogWorkoutModal />);
+    expect(screen.getByText(/Enter duration and perceived effort to log this session\./)).
+      toBeTruthy();
+  });
+
+  it("a partially entered draft is still refused", () => {
+    storeDraft = { ...REAL_INITIAL_DRAFT, durationMin: 42 };
+    render(<LogWorkoutModal />);
+    expect(applyBtn().disabled, "duration alone is not enough").toBe(true);
+    expect(screen.getByText(/Enter perceived effort to log this session\./)).toBeTruthy();
+  });
+
+  it("ONCE SUPPLIED, the entered values are what gets logged", async () => {
+    storeDraft = { ...REAL_INITIAL_DRAFT, durationMin: 63, rpe: 9 };
+    render(<LogWorkoutModal />);
+    expect(applyBtn().disabled, "a complete draft must be submittable").toBe(false);
+    fireEvent.click(applyBtn());
+    await vi.waitFor(() => expect(logged.length).toBe(1));
+    const b = logged[0] as unknown as Record<string, unknown>;
+    // The athlete's numbers, not the sample ones.
+    expect(b.duration_minutes).toBe(63);
+    expect(b.session_rpe).toBe(9);
+    expect(b.duration_minutes).not.toBe(COMPLETE_DRAFT.durationMin);
   });
 });

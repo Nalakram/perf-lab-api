@@ -18,6 +18,14 @@
 //   guest / sample state        -> unreachable from here
 //   zero or a neutral midpoint  -> NEVER used to mean unknown
 //
+// ...and its consequence for a field the backend makes REQUIRED. `duration_minutes`
+// and `session_rpe` cannot be omitted (app/schemas/workouts.py), so "the athlete has
+// not entered it" cannot be encoded in the body at all. The honest resolution is that
+// THERE IS NO BODY: `buildWorkoutLog` returns `null`, and the caller must not submit.
+// `missingRequiredReadings` names what is still needed so the UI can say so and keep
+// Apply disabled. Previously these fields were seeded in the store (42 min / 9 km /
+// RPE 7), so an untouched modal produced a complete, plausible, fictional body.
+//
 // The backend half (ADR-0049) makes `sleep_quality` / `life_stress_inverse` genuinely
 // nullable: absent means "no check-in exists", is stored as SQL NULL, and contributes a
 // LABELLED neutral (no dose penalty, zero confidence) instead of the old imputed 5.0.
@@ -80,23 +88,63 @@ export function checkinToWorkoutWellness(c: CheckinState): WorkoutWellness {
   };
 }
 
-/** Build a backend WorkoutLog from the modal's form state.
+/** The session modality the body will carry: derived from the sets when there are
+ *  any (ADR-0045), else implied by the chosen session type. */
+function resolveModality(logType: string, setGroups: SetGroup[]): Modality {
+  const sets = groupsToSets(setGroups);
+  return (
+    (sets.length ? deriveModality(setGroups) : null) ??
+    (logType === "strength" ? "Strength" : "Running")
+  );
+}
+
+/** A reading the athlete must supply before this session can be logged. */
+export type RequiredReading = "duration" | "effort" | "distance";
+
+/**
+ * Which required readings have not been entered. Empty means submittable.
+ *
+ * `duration` and `effort` are unconditional — the backend requires
+ * `duration_minutes` and `session_rpe` on every log. `distance` is required only for
+ * a session that would actually carry it: running-shaped with no per-set entry, the
+ * one case `buildWorkoutLog` sends `distance_meters`. A strength session, or any
+ * session logged per-set, never needs it.
+ */
+export function missingRequiredReadings(
+  logType: string,
+  rpe: number | null,
+  durationMin: number | null,
+  distanceKm: number | null,
+  setGroups: SetGroup[] = [],
+): readonly RequiredReading[] {
+  const missing: RequiredReading[] = [];
+  if (durationMin === null) missing.push("duration");
+  if (rpe === null) missing.push("effort");
+  const carriesDistance =
+    groupsToSets(setGroups).length === 0 && resolveModality(logType, setGroups) === "Running";
+  if (carriesDistance && distanceKm === null) missing.push("distance");
+  return missing;
+}
+
+/** Build a backend WorkoutLog from the modal's form state, or `null` when the
+ * athlete has not supplied every required reading.
  *
  * When per-set groups are present (ADR-0045) they are the record: `sets` is sent,
  * the session modality is derived from them (the backend derives it too), and the
  * running-shaped session distance is dropped so the backend rolls it up from sets. */
 export function buildWorkoutLog(
   logType: string,
-  rpe: number,
-  durationMin: number,
-  distanceKm: number,
+  rpe: number | null,
+  durationMin: number | null,
+  distanceKm: number | null,
   wellness: WorkoutWellness,
   setGroups: SetGroup[] = [],
-): WorkoutLog {
+): WorkoutLog | null {
+  if (missingRequiredReadings(logType, rpe, durationMin, distanceKm, setGroups).length) {
+    return null;
+  }
   const sets = groupsToSets(setGroups);
-  const modality: Modality =
-    (sets.length ? deriveModality(setGroups) : null) ??
-    (logType === "strength" ? "Strength" : "Running");
+  const modality: Modality = resolveModality(logType, setGroups);
   // We send only what the form captures; the backend fills server-side defaults
   // for omitted fields (is_benchmark, novelty, total_volume_load, …). `satisfies`
   // still type-checks the fields we DO set against the contract; the cast covers
@@ -104,8 +152,9 @@ export function buildWorkoutLog(
   return {
     timestamp: new Date().toISOString(),
     modality,
-    duration_minutes: durationMin,
-    session_rpe: rpe,
+    // Non-null by the guard above: every required reading was supplied.
+    duration_minutes: durationMin as number,
+    session_rpe: rpe as number,
     // Wellness is OMITTED, not defaulted, when the athlete has not reported it. The
     // key is absent from the JSON body entirely — the backend then records SQL NULL
     // and applies a labelled neutral rather than a fabricated midpoint (ADR-0049).
@@ -116,7 +165,7 @@ export function buildWorkoutLog(
     ...(sets.length
       ? { sets }
       : modality === "Running"
-        ? { distance_meters: Math.round(distanceKm * 1000) }
+        ? { distance_meters: Math.round((distanceKm as number) * 1000) }
         : {}),
   } satisfies Partial<WorkoutLog> as WorkoutLog;
 }

@@ -84,11 +84,17 @@ export interface PerfLabState {
   authOpen: boolean;
   logOpen: boolean;
   logType: string;
-  rpe: number;
+  /** The workout-log draft readings. `null` means THE ATHLETE HAS NOT ENTERED IT.
+   *  Never a seeded number standing in for "unknown" — that is the whole point:
+   *  these four fed `buildWorkoutLog` directly, so an untouched modal used to
+   *  submit 42 min / 9 km / RPE 7 to the real backend. Sample values for the
+   *  guest preview live in the fixture module (`sim.SAMPLE_LOG_DRAFT`), which is
+   *  where fixtures belong and where the submit path cannot reach them. */
+  rpe: number | null;
   logApplied: boolean;
-  durationMin: number;
-  distanceKm: number;
-  paceSec: number;
+  durationMin: number | null;
+  distanceKm: number | null;
+  paceSec: number | null;
   /** GUEST-preview scrub index over the deterministic sim `DAYS` only. Never the
    *  cross-screen contract for the live twin — that is `selectedTwinSnapshotId`. */
   twinDayIdx: number | null;
@@ -174,11 +180,11 @@ export function initialState(): PerfLabState {
     authOpen: false,
     logOpen: false,
     logType: "tempo",
-    rpe: 7,
+    rpe: null,
     logApplied: false,
-    durationMin: 42,
-    distanceKm: 9,
-    paceSec: 278,
+    durationMin: null,
+    distanceKm: null,
+    paceSec: null,
     twinDayIdx: null,
     selectedTwinSnapshotId: null,
     navCollapsed: false,
@@ -303,11 +309,12 @@ export interface PerfLabActions {
   openLog: () => void;
   closeLog: () => void;
   applyLog: () => void;
-  setRpe: (n: number) => void;
+  /** `null` clears the reading back to "not entered". */
+  setRpe: (n: number | null) => void;
   setLogType: (k: string) => void;
-  setDur: (n: number) => void;
-  setDist: (n: number) => void;
-  setPaceSec: (n: number) => void;
+  setDur: (n: number | null) => void;
+  setDist: (n: number | null) => void;
+  setPaceSec: (n: number | null) => void;
   setTwinDay: (i: number) => void;
   /** Select a live twin snapshot by its persisted row id (null = newest). */
   setSelectedTwinSnapshot: (id: number | null) => void;
@@ -371,7 +378,18 @@ export function buildActions(dispatch: Dispatch<Action>): PerfLabActions {
     seedTwin: () => merge({ ftDone: true, fresh: false, screen: "twin" }),
     obNext: () => mergeFn((s) => ({ obStep: Math.min(3, s.obStep + 1) })),
     obBack: () => mergeFn((s) => ({ obStep: Math.max(1, s.obStep - 1) })),
-    openLog: () => merge({ logOpen: true, logApplied: false }),
+    // Opening the log CLEARS the draft. Without this, the readings from a session
+    // already logged stay in the store, and reopening + Apply silently re-submits
+    // them as if they were entered for the new session.
+    openLog: () =>
+      merge({
+        logOpen: true,
+        logApplied: false,
+        rpe: null,
+        durationMin: null,
+        distanceKm: null,
+        paceSec: null,
+      }),
     closeLog: () => merge({ logOpen: false }),
     applyLog: () => merge({ logOpen: false, logApplied: true, screen: "twin" }),
     setRpe: (n) => merge({ rpe: n }),
