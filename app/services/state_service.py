@@ -40,6 +40,9 @@ from app.models.workout_log import WorkoutLog as WorkoutLogORM
 from app.models.workout_set_log import WorkoutSetLog
 from app.repositories.athlete_context_repository import AthleteContextRepository
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
+from app.repositories.benchmark_observation_repository import (
+    prescription_basis_filter,
+)
 from app.schemas.engine_vectors import FatigueState, TissueState
 from app.schemas.history import WorkoutLogSummary
 from app.schemas.state import StateHistorySnapshotRead, UnifiedStateVector
@@ -863,7 +866,10 @@ async def prelog_e1rm_denominators(
         .where(
             BenchmarkObservation.user_id == user_id,
             BenchmarkDefinition.code.in_(codes),
-            BenchmarkObservation.validity_status == "valid",
+            # ADR-0056: shares one predicate with
+            # `prescription_service._current_e1rm_values` so dose intensity and
+            # prescribed load resolve the same e1RM.
+            prescription_basis_filter(),
         )
         .order_by(BenchmarkObservation.observed_at.desc())
     )

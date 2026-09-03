@@ -267,6 +267,7 @@ async def seed() -> None:
                         raw_value=value,
                         bodyweight_kg=round(bw, 1),
                         source="kaggle:open-powerlifting",
+                        affects_prescription=True,
                     )
                 )
                 counts["strength_obs"] += 1

@@ -203,6 +203,10 @@ async def seed(n_users: int = 25, runs_per_athlete: int = 3) -> None:
                         raw_value=value,
                         bodyweight_kg=round(bw, 1),
                         source="synthetic:strength_standards",
+                        # Stated, not left NULL: this is the athlete's standing 1RM in
+                        # the corpus, so it is exactly what a prescription should size
+                        # from. An omitted flag now means "unusable" (a041).
+                        affects_prescription=True,
                     )
                 )
                 counts["strength_obs"] += 1
@@ -220,6 +224,7 @@ async def seed(n_users: int = 25, runs_per_athlete: int = 3) -> None:
                         observed_at=when,
                         raw_value=seconds,
                         source="kaggle:run_ww_2020",
+                        affects_prescription=True,
                     )
                 )
                 counts["endurance_obs"] += 1

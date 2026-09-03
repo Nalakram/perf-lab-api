@@ -24,6 +24,9 @@ from app.models.exercise import Exercise
 from app.models.mesocycle import BlockStatus, MesocycleBlock, PlannedSession
 from app.models.weak_point import WeakPoint
 from app.repositories.athlete_profile_repository import AthleteProfileRepository
+from app.repositories.benchmark_observation_repository import (
+    prescription_basis_filter,
+)
 from app.schemas.prescription import ConservatismSummary, WorkoutPrescription
 from app.schemas.state import UnifiedStateVector
 from app.schemas.training_goals import TRAINING_GOAL_DEFAULT, TrainingGoal
@@ -206,7 +209,9 @@ async def _current_e1rm_values(
         .where(
             BenchmarkObservation.user_id == user_id,
             BenchmarkDefinition.code.in_(codes),
-            BenchmarkObservation.validity_status == "valid",
+            # ADR-0056: the same predicate `prelog_e1rm_denominators` uses, so the
+            # prescribed load and the dose-intensity denominator cannot disagree.
+            prescription_basis_filter(),
         )
         .order_by(BenchmarkObservation.observed_at.desc())
     )
