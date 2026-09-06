@@ -1,9 +1,9 @@
 from __future__ import annotations
 
 from datetime import date, timedelta
-from typing import Any
+from typing import Any, TypedDict
 
-from sqlalchemy import and_, func, select
+from sqlalchemy import and_, func, or_, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.logic.domain_vocab import block_goal_to_domain, canonical_domain
@@ -15,6 +15,7 @@ from app.models.mesocycle import (
     SessionStatus,
 )
 from app.models.objective import Objective
+from app.models.telemetry import SessionFeedback
 from app.schemas.planning import (
     BlockCreateRequest,
     BlockUpdateRequest,
@@ -248,25 +249,69 @@ async def create_block_with_sessions(
     return block
 
 
-async def count_block_skips(
+class BlockAdherenceSignals(TypedDict):
+    """Adherence evidence for one block — the prescriber's only adherence input.
+
+    Two disjoint counts over the same session set, never two overlapping views of
+    one session (ADR-0070).
+    """
+
+    recent_skips: int
+    recent_modifications: int
+
+
+async def block_adherence_signals(
     db: AsyncSession,
     user_id: int,
     block_id: int,
-) -> int:
-    """Count SKIPPED planned sessions in a block — an adherence signal the
-    prescriber uses to bias toward lighter/variety work after repeated skips."""
+) -> BlockAdherenceSignals:
+    """Skipped and athlete-modified sessions in a block, counted once each.
+
+    One query, so the two counts cannot disagree about a session (ADR-0070).
+    ``PlannedSession.status`` is the canonical source of *occurrence*:
+    ``recent_skips`` comes from it alone, and a modification is counted only for a
+    session that actually COMPLETED. A skipped session therefore contributes to
+    exactly one count even when its feedback row also flags a modification —
+    dropping the athlete's own report of a skip they also modified is the correct
+    trade for never penalising one session twice.
+
+    Recency is block membership, derived from the planned session, never from
+    ``SessionFeedback.created_at``: submission time measures reporting behaviour,
+    not training behaviour, and would make a replay non-reproducible.
+
+    The LEFT JOIN cannot fan out — ``session_feedback.planned_session_id`` is
+    unique — so each planned session yields exactly one row and the counts are
+    deduplicated by construction rather than by a DISTINCT.
+    """
+    modified = or_(
+        SessionFeedback.modified_volume.is_(True),
+        SessionFeedback.modified_intensity.is_(True),
+        SessionFeedback.modified_exercises.is_(True),
+    )
     result = await db.execute(
-        select(func.count())
+        select(
+            func.count().filter(PlannedSession.status == SessionStatus.SKIPPED),
+            func.count().filter(
+                and_(PlannedSession.status == SessionStatus.COMPLETED, modified)
+            ),
+        )
         .select_from(PlannedSession)
+        .outerjoin(
+            SessionFeedback,
+            SessionFeedback.planned_session_id == PlannedSession.id,
+        )
         .where(
             and_(
                 PlannedSession.user_id == user_id,
                 PlannedSession.block_id == block_id,
-                PlannedSession.status == SessionStatus.SKIPPED,
             )
         )
     )
-    return int(result.scalar_one() or 0)
+    skips, modifications = result.one()
+    return BlockAdherenceSignals(
+        recent_skips=int(skips or 0),
+        recent_modifications=int(modifications or 0),
+    )
 
 
 async def update_block(

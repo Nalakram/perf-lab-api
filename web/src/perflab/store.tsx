@@ -123,6 +123,12 @@ export interface PerfLabState {
   checkinOpen: boolean;
   feedbackOpen: boolean;
   feedbackApplied: boolean;
+  /** The planned session the feedback overlay is reporting on. Null means the
+   *  guest preview, which has no real session behind it — the overlay uses this
+   *  to decide whether it can write anything at all. */
+  feedbackSessionId: number | null;
+  /** Bumped after feedback is recorded so the week strip re-reads session state. */
+  feedbackRefreshKey: number;
   feel: Feel;
   /** Block-creation overlay (POST /v1/planning/blocks) — see BlockCreateModal. */
   blockCreateOpen: boolean;
@@ -221,6 +227,8 @@ export function initialState(): PerfLabState {
     checkinOpen: false,
     feedbackOpen: false,
     feedbackApplied: false,
+    feedbackSessionId: null,
+    feedbackRefreshKey: 0,
     feel: "controlled",
     blockCreateOpen: false,
     planningRefreshKey: 0,
@@ -333,10 +341,15 @@ export interface PerfLabActions {
   closeExplain: () => void;
   setSim: (patch: Partial<SimParams>) => void;
   simPreset: (name: "maintain" | "build" | "aggressive") => void;
-  openFeedback: () => void;
+  /** Report on a real planned session. The id is required: without it there is
+   *  nothing to write to, and inferring one from what happens to be on screen is
+   *  how feedback lands on the wrong session. */
+  openFeedback: (plannedSessionId: number) => void;
   closeFeedback: () => void;
   applyFeedback: () => void;
   feedbackToTwin: () => void;
+  /** Bump after feedback is recorded so dependents re-fetch. */
+  refreshFeedback: () => void;
   setFeel: (feel: Feel, rpe: number) => void;
   setSetting: <K extends keyof Settings>(key: K, value: Settings[K]) => void;
   toggleNav: () => void;
@@ -404,7 +417,17 @@ export function buildActions(dispatch: Dispatch<Action>): PerfLabActions {
     closeSession: () => merge({ sessOpen: false, sessRunning: false }),
     sessToggle: () => dispatch({ type: "sessToggle" }),
     sessSkip: () => dispatch({ type: "sessSkip" }),
-    sessToLog: () => merge({ sessOpen: false, sessRunning: false, feedbackOpen: true, feedbackApplied: false }),
+    // Guest demo path only (SessionPlayer is guest-only). `feedbackSessionId`
+    // stays null so the overlay knows there is no real session to report on and
+    // renders the preview rather than a form that could not submit.
+    sessToLog: () =>
+      merge({
+        sessOpen: false,
+        sessRunning: false,
+        feedbackOpen: true,
+        feedbackApplied: false,
+        feedbackSessionId: null,
+      }),
     openCheckin: () => merge({ checkinOpen: true }),
     closeCheckin: () => merge({ checkinOpen: false }),
     applyCheckin: () =>
@@ -429,10 +452,13 @@ export function buildActions(dispatch: Dispatch<Action>): PerfLabActions {
               ? { volume: 62, intensity: "balanced", recovery: "standard" }
               : { volume: 80, intensity: "hard", recovery: "minimal" },
       }),
-    openFeedback: () => merge({ feedbackOpen: true, feedbackApplied: false }),
-    closeFeedback: () => merge({ feedbackOpen: false }),
+    openFeedback: (plannedSessionId) =>
+      merge({ feedbackOpen: true, feedbackApplied: false, feedbackSessionId: plannedSessionId }),
+    closeFeedback: () => merge({ feedbackOpen: false, feedbackSessionId: null }),
     applyFeedback: () => merge({ feedbackApplied: true }),
-    feedbackToTwin: () => merge({ feedbackOpen: false, feedbackApplied: false, screen: "twin" }),
+    feedbackToTwin: () =>
+      merge({ feedbackOpen: false, feedbackApplied: false, feedbackSessionId: null, screen: "twin" }),
+    refreshFeedback: () => mergeFn((s) => ({ feedbackRefreshKey: s.feedbackRefreshKey + 1 })),
     setFeel: (feel, rpe) => merge({ feel, rpe }),
     setSetting: (key, value) => dispatch({ type: "mergeSettings", patch: { [key]: value } as Partial<Settings> }),
     toggleNav: () => mergeFn((s) => ({ navCollapsed: !s.navCollapsed })),

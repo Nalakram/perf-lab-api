@@ -39,6 +39,8 @@ import type {
   UnifiedStateVector,
   UserResponse,
   WearableConnectionOut,
+  SessionFeedbackIn,
+  SessionFeedbackOut,
   WellnessSampleIn,
   WellnessSampleOut,
   WorkoutLog,
@@ -483,6 +485,40 @@ export async function listWellness(
     headers: { ...authHeaders(token) },
   });
   return handleResponse<WellnessSampleOut[]>(res, { sessionOn401: true });
+}
+
+/* ---------- Session feedback (athlete-reported outcomes) ---------- */
+
+/**
+ * Report the outcome of one planned session. The session must already be
+ * completed or skipped — feedback describes an outcome, it never creates one,
+ * and it never changes the session's status (ADR-0070). A 409 means either the
+ * session has not happened yet or feedback was already recorded for it.
+ */
+export async function createSessionFeedback(
+  body: SessionFeedbackIn,
+  token: string,
+): Promise<SessionFeedbackOut> {
+  if (!API_V1_BASE) throw new Error("VITE_API_BASE_URL is not configured (no /v1 base)");
+  const res = await fetch(`${API_V1_BASE}/feedback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json", ...authHeaders(token) },
+    body: JSON.stringify(body),
+  });
+  return handleResponse<SessionFeedbackOut>(res, { sessionOn401: true });
+}
+
+/** The athlete's recent reported session outcomes, newest first. */
+export async function listSessionFeedback(
+  token: string,
+  limit?: number,
+): Promise<SessionFeedbackOut[]> {
+  if (!API_V1_BASE) throw new Error("VITE_API_BASE_URL is not configured (no /v1 base)");
+  const query = limit != null ? `?limit=${limit}` : "";
+  const res = await fetch(`${API_V1_BASE}/feedback${query}`, {
+    headers: { ...authHeaders(token) },
+  });
+  return handleResponse<SessionFeedbackOut[]>(res, { sessionOn401: true });
 }
 
 /**

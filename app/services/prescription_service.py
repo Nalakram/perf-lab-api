@@ -35,7 +35,7 @@ from app.services import dashboard_service, readiness_service, strength_decline_
 from app.services.decision_telemetry import persist_prescription_decision
 from app.services.mpc_shadow_service import record_mpc_shadow
 from app.services.objective_service import active_objective_signals
-from app.services.planning_service import count_block_skips, get_today_session
+from app.services.planning_service import block_adherence_signals, get_today_session
 from app.services.state_service import (
     load_current_state_strict,
     load_or_init_current_state_strict,
@@ -51,7 +51,11 @@ class BlockContext(TypedDict, total=False):
     duration_weeks: int
     deload_every_n_weeks: int
     deload_volume_factor: float | None
+    # Adherence evidence, both from one block-scoped query so they cannot
+    # double-count a session (ADR-0070 — status owns occurrence, feedback
+    # contributes only the modification dimension).
     recent_skips: int
+    recent_modifications: int
     target_session_minutes: int | None
     accessory_emphasis: str | None
     accessory_focus: list[str] | None
@@ -456,7 +460,7 @@ async def _gather_prescription_context(
             duration_weeks=active_block.duration_weeks,
             deload_every_n_weeks=active_block.deload_every_n_weeks,
             deload_volume_factor=active_block.deload_volume_factor,
-            recent_skips=await count_block_skips(db, user_id, active_block.id),
+            **await block_adherence_signals(db, user_id, active_block.id),
             target_session_minutes=active_block.target_session_minutes,
             accessory_emphasis=active_block.accessory_emphasis,
             accessory_focus=active_block.accessory_focus,

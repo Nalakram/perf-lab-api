@@ -29,6 +29,12 @@ interface WeekCell {
   subColor: string;
   today?: boolean;
   rest?: boolean;
+  /** The real planned session behind this cell. Guest fixture cells have none,
+   *  which is what keeps the feedback affordance off the preview. */
+  sessionId?: number;
+  /** Completed or skipped — the only states with an outcome to report on
+   *  (ADR-0070). Pending and rescheduled sessions have not happened. */
+  terminal?: boolean;
 }
 
 // Prototype week — GUEST preview only (signed-in users get buildWeekCells).
@@ -83,6 +89,8 @@ function buildWeekCells(monday: Date, sessions: PlannedSessionRead[] | null): We
       sub: s.is_deload ? "deload" : titleCase(s.modality),
       subColor: "text-teal",
       today,
+      sessionId: s.id,
+      terminal: s.status === "completed" || s.status === "skipped",
     };
   });
 }
@@ -107,9 +115,13 @@ function AuthedPlanningBody() {
   );
   // `planningRefreshKey` is bumped by BlockCreateModal after a successful
   // POST /v1/planning/blocks so a freshly created block's week shows up here.
+  // `feedbackRefreshKey` is bumped after feedback is recorded — this list is what
+  // renders the affordance, so it is the resource that has to re-read. Note this
+  // re-reads the session LIST, which is a plain GET; re-fetching a prescription
+  // would rewrite `prescribed_content`, so it is deliberately not invalidated here.
   const sessions = useAuthedResource<PlannedSessionRead[]>(
     (t) => api.listPlannedSessions(t, { start_date: week.start_date, end_date: week.end_date }),
-    [week.start_date, state.planningRefreshKey],
+    [week.start_date, state.planningRefreshKey, state.feedbackRefreshKey],
   );
 
   // Week-strip load / error / genuinely-no-block distinction (kept from before):
@@ -157,6 +169,18 @@ function AuthedPlanningBody() {
                   </div>
                   <div className={`mt-auto text-[12px] leading-[1.3] ${w.today ? "font-bold text-ink" : w.rest ? "font-semibold text-faint" : "font-semibold text-mute"}`}>{w.title}</div>
                   {w.sub && <div className={`mt-1 text-[10px] font-medium leading-none ${w.subColor}`}>{w.sub}</div>}
+                  {/* Feedback needs a session that actually has an outcome. The
+                      id comes from this cell's own row, never from whatever the
+                      prescription card happens to be showing — those are separate
+                      resources and can target different sessions. */}
+                  {w.terminal && w.sessionId != null && (
+                    <button
+                      onClick={() => actions.openFeedback(w.sessionId!)}
+                      className="mt-2 rounded-[7px] border border-white/10 bg-white/[0.04] px-2 py-[5px] text-[10px] font-semibold leading-none text-soft"
+                    >
+                      Feedback
+                    </button>
+                  )}
                 </div>
               ))}
             </div>
