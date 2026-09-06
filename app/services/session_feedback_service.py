@@ -12,12 +12,20 @@ from __future__ import annotations
 
 from fastapi import HTTPException
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.models.mesocycle import PlannedSession
+from app.models.mesocycle import PlannedSession, SessionStatus
 from app.models.telemetry import SessionFeedback
 from app.models.workout_log import WorkoutLog
 from app.schemas.session_feedback import SessionFeedbackIn
+
+# Feedback describes an outcome, so the session must already have one (ADR-0070).
+# RESCHEDULED is deliberately absent: a moved session has not happened yet, and
+# PENDING obviously has not either.
+_TERMINAL_STATUSES = frozenset({SessionStatus.COMPLETED, SessionStatus.SKIPPED})
+
+_DUPLICATE_DETAIL = "Feedback already recorded for this session"
 
 
 async def create_feedback(
@@ -41,6 +49,20 @@ async def create_feedback(
     if planned_session is None:
         raise HTTPException(status_code=404, detail="Planned session not found")
 
+    # 1b. The session must already be in a terminal state (ADR-0070). Feedback
+    # describes an outcome; it never creates one, and it never writes `status` —
+    # `PlannedSession.status` stays the single canonical source of occurrence, so
+    # the adherence aggregate cannot be handed two disagreeing accounts of one
+    # session.
+    if planned_session.status not in _TERMINAL_STATUSES:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                "Planned session is not complete or skipped yet; "
+                "record the outcome on the session before giving feedback"
+            ),
+        )
+
     # 2. If a completed workout log is referenced, it must belong to the caller too.
     if payload.completed_workout_log_id is not None:
         workout_log = (
@@ -63,9 +85,7 @@ async def create_feedback(
         )
     ).scalars().first()
     if existing is not None:
-        raise HTTPException(
-            status_code=409, detail="Feedback already recorded for this session"
-        )
+        raise HTTPException(status_code=409, detail=_DUPLICATE_DETAIL)
 
     feedback = SessionFeedback(
         planned_session_id=payload.planned_session_id,
@@ -84,6 +104,34 @@ async def create_feedback(
         notes=payload.notes,
     )
     db.add(feedback)
-    await db.commit()
+    # The check above narrows the window; it does not close it. Two concurrent
+    # submissions can both find no existing row, and the loser then violates the
+    # unique constraint on `planned_session_id`. An in-process guard cannot help —
+    # API workers are separate processes — so the database arbitrates and both
+    # callers are told the same thing rather than one receiving a 500.
+    try:
+        await db.commit()
+    except IntegrityError:
+        await db.rollback()
+        raise HTTPException(status_code=409, detail=_DUPLICATE_DETAIL) from None
     await db.refresh(feedback)
     return feedback
+
+
+async def list_feedback(
+    db: AsyncSession, user_id: int, *, limit: int = 30
+) -> list[SessionFeedback]:
+    """The caller's most recent feedback rows, newest first.
+
+    Scoped by joining ``PlannedSession`` rather than filtering a column:
+    ``SessionFeedback`` has no ``user_id`` of its own, and putting the ownership
+    predicate inside the query leaves no check-then-fetch gap.
+    """
+    result = await db.execute(
+        select(SessionFeedback)
+        .join(PlannedSession, SessionFeedback.planned_session_id == PlannedSession.id)
+        .where(PlannedSession.user_id == user_id)
+        .order_by(SessionFeedback.created_at.desc(), SessionFeedback.id.desc())
+        .limit(limit)
+    )
+    return list(result.scalars().all())

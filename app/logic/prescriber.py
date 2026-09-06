@@ -57,10 +57,18 @@ from app.schemas.training_goals import TRAINING_GOAL_DEFAULT, TrainingGoal
 # the MesocycleBlock.deload_volume_factor column default (app.models.mesocycle).
 DEFAULT_DELOAD_VOLUME_FACTOR = 0.6
 
-# When an athlete has skipped this many recent planned sessions, bias the
-# prescription toward lighter/variety/recovery work to rebuild adherence.
+# When adherence friction reaches this level, bias the prescription toward
+# lighter/variety/recovery work to rebuild adherence.
 RECENT_SKIPS_BIAS_THRESHOLD = 2
 _ADHERENCE_FRIENDLY_TYPE_KEYWORDS = ("variety", "recovery", "maintenance", "skill")
+
+# A session the athlete modified is weaker evidence of friction than one they did
+# not do at all, so it counts for less rather than the same (ADR-0070 precedence).
+# The two counts are disjoint by construction — the aggregate that produces them
+# credits any session to exactly one — so combining them cannot double-penalise.
+# At weight 0 this collapses to the historical skips-only behaviour, which is why
+# a block with no reported modifications prescribes exactly what it did before.
+MODIFICATION_FRICTION_WEIGHT = 0.5
 
 # Block session-preference bounds (Phase 3a). A block's explicit
 # `target_session_minutes` overrides the periodization-scaled duration, but is
@@ -687,6 +695,8 @@ def recommend_next_session(
 
     # --- 3. Score and sort ---
     recent_skips = int(block.get("recent_skips", 0) or 0)
+    recent_modifications = int(block.get("recent_modifications", 0) or 0)
+    adherence_friction = recent_skips + MODIFICATION_FRICTION_WEIGHT * recent_modifications
     objective_domain_raw = block.get("objective_domain")
     objective_domain = canonical_domain(str(objective_domain_raw)) if objective_domain_raw else None
 
@@ -699,11 +709,11 @@ def recommend_next_session(
         # matches the top active objective's domain.
         if objective_domain and c.domain and c.domain == objective_domain:
             base += OBJECTIVE_DOMAIN_BOOST
-        # Repeated recent skips → bias toward lighter/variety/recovery work.
-        if recent_skips >= RECENT_SKIPS_BIAS_THRESHOLD and any(
+        # Repeated skips or modifications → bias toward lighter/variety/recovery work.
+        if adherence_friction >= RECENT_SKIPS_BIAS_THRESHOLD and any(
             k in c.type.lower() for k in _ADHERENCE_FRIENDLY_TYPE_KEYWORDS
         ):
-            base += min(0.3, 0.1 * recent_skips)
+            base += min(0.3, 0.1 * adherence_friction)
         # DeloadNeed bias: boost recovery/maintenance/technique if tier == "bias"
         if deload_need.tier == "bias" and any(
             k in c.type.lower() for k in ("recovery", "maintenance", "technique", "deload")
@@ -795,8 +805,16 @@ def recommend_next_session(
             rx.why.constraints_applied.append(f"block:deload(×{factor:.2f})")
     if block.get("is_benchmark") and rx.why:
         rx.why.constraints_applied.append("block:benchmark")
-    if recent_skips >= RECENT_SKIPS_BIAS_THRESHOLD and rx.why:
-        rx.why.constraints_applied.append(f"adherence:recent_skips={recent_skips}")
+    if adherence_friction >= RECENT_SKIPS_BIAS_THRESHOLD and rx.why:
+        # Report the components, not the combined score: the athlete is owed the
+        # evidence ("you skipped 3") rather than an opaque friction number. Each
+        # component is emitted only when it actually contributed.
+        if recent_skips:
+            rx.why.constraints_applied.append(f"adherence:recent_skips={recent_skips}")
+        if recent_modifications:
+            rx.why.constraints_applied.append(
+                f"adherence:recent_modifications={recent_modifications}"
+            )
 
     # Goal-specific exercise payload — prefer the winning template's
     # exercise_slots; equipment map (with bodyweight fallback) only applies

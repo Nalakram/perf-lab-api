@@ -119,6 +119,10 @@ export type MacrocycleUpdate = Schemas["MacrocycleUpdate"];
 export type MacrocycleStatus = Schemas["MacrocycleStatus"];
 export type WeekProgress = Schemas["WeekProgress"];
 
+/* ---------- Session feedback (athlete-reported outcomes: /v1/feedback) ---------- */
+export type SessionFeedbackIn = Schemas["SessionFeedbackIn"];
+export type SessionFeedbackOut = Schemas["SessionFeedbackOut"];
+
 /* ---------- Wearable sync / Oura (Phase 2: /v1/integrations/oura/*) ---------- */
 export type WearableConnectionOut = Schemas["WearableConnectionOut"];
 export type ConnectionStatus = Schemas["ConnectionStatus"];

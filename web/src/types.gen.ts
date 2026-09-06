@@ -307,7 +307,11 @@ export interface paths {
             path?: never;
             cookie?: never;
         };
-        get?: never;
+        /**
+         * List Feedback
+         * @description The caller's recent session feedback, newest first.
+         */
+        get: operations["list_feedback_v1_feedback_get"];
         put?: never;
         /**
          * Create Feedback
@@ -4109,6 +4113,37 @@ export interface operations {
                 };
                 content: {
                     "application/json": components["schemas"]["ExerciseCatalogOut"][];
+                };
+            };
+            /** @description Validation Error */
+            422: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["HTTPValidationError"];
+                };
+            };
+        };
+    };
+    list_feedback_v1_feedback_get: {
+        parameters: {
+            query?: {
+                limit?: number;
+            };
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Successful Response */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["SessionFeedbackOut"][];
                 };
             };
             /** @description Validation Error */

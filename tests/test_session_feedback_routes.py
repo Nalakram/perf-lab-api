@@ -41,7 +41,15 @@ async def _current_user_id(client, hdr) -> int:
     return me.json()["id"]
 
 
-async def _mk_planned_session(async_db, user_id: int) -> PlannedSession:
+async def _mk_planned_session(
+    async_db, user_id: int, *, status: SessionStatus = SessionStatus.COMPLETED
+) -> PlannedSession:
+    """A planned session for the given user.
+
+    Defaults to COMPLETED because feedback describes an outcome and is refused for
+    a session that has not reached one (ADR-0070). Pass PENDING to exercise that
+    refusal.
+    """
     block = MesocycleBlock(
         user_id=user_id,
         goal=BlockGoal.STRENGTH,
@@ -62,7 +70,7 @@ async def _mk_planned_session(async_db, user_id: int) -> PlannedSession:
         day_of_week=1,
         category="Heavy Lower",
         modality="strength",
-        status=SessionStatus.PENDING,
+        status=status,
     )
     async_db.add(ps)
     await async_db.commit()
@@ -206,3 +214,70 @@ async def test_create_feedback_unauthenticated(http_client):
         "/v1/feedback", json={"planned_session_id": 1, "status": "completed"}
     )
     assert resp.status_code == 401
+
+
+async def test_feedback_refused_for_a_session_that_has_not_happened(http_client, async_db):
+    """A PENDING session has no outcome yet, so there is nothing to report.
+
+    This is the boundary that keeps `PlannedSession.status` canonical (ADR-0070):
+    without it an athlete could declare a skip through feedback while the session
+    stayed PENDING, and the adherence aggregate would hold two disagreeing
+    accounts of one session.
+    """
+    token = await _register_and_get_token(http_client, "fb_pending@test.com", "securepass1")
+    hdr = {"Authorization": f"Bearer {token}"}
+    uid = await _current_user_id(http_client, hdr)
+    ps = await _mk_planned_session(async_db, uid, status=SessionStatus.PENDING)
+
+    resp = await http_client.post(
+        "/v1/feedback",
+        json={"planned_session_id": ps.id, "status": "skipped"},
+        headers=hdr,
+    )
+    assert resp.status_code == 409, resp.text
+
+    # And nothing was written — a refused report must leave no trace.
+    rows = (
+        await async_db.execute(
+            select(SessionFeedback).where(SessionFeedback.planned_session_id == ps.id)
+        )
+    ).scalars().all()
+    assert rows == []
+
+
+async def test_list_feedback_returns_only_the_callers_rows(http_client, async_db):
+    """The read route is scoped through PlannedSession, which owns the user id."""
+    mine = await _register_and_get_token(http_client, "fb_list_mine@test.com", "securepass1")
+    mine_hdr = {"Authorization": f"Bearer {mine}"}
+    mine_uid = await _current_user_id(http_client, mine_hdr)
+
+    theirs = await _register_and_get_token(http_client, "fb_list_other@test.com", "securepass1")
+    theirs_hdr = {"Authorization": f"Bearer {theirs}"}
+    theirs_uid = await _current_user_id(http_client, theirs_hdr)
+
+    my_ps = await _mk_planned_session(async_db, mine_uid)
+    their_ps = await _mk_planned_session(async_db, theirs_uid)
+
+    assert (
+        await http_client.post(
+            "/v1/feedback",
+            json={"planned_session_id": my_ps.id, "status": "completed"},
+            headers=mine_hdr,
+        )
+    ).status_code == 201
+    assert (
+        await http_client.post(
+            "/v1/feedback",
+            json={"planned_session_id": their_ps.id, "status": "completed"},
+            headers=theirs_hdr,
+        )
+    ).status_code == 201
+
+    listed = await http_client.get("/v1/feedback", headers=mine_hdr)
+    assert listed.status_code == 200, listed.text
+    body = listed.json()
+    assert [r["planned_session_id"] for r in body] == [my_ps.id]
+
+
+async def test_list_feedback_unauthenticated(http_client):
+    assert (await http_client.get("/v1/feedback")).status_code == 401
