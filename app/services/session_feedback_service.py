@@ -27,6 +27,16 @@ _TERMINAL_STATUSES = frozenset({SessionStatus.COMPLETED, SessionStatus.SKIPPED})
 
 _DUPLICATE_DETAIL = "Feedback already recorded for this session"
 
+# What the athlete may say about a session, given what the session says happened.
+# `PlannedSession.status` owns occurrence (ADR-0070), so a report that contradicts
+# it is refused rather than stored: a completed session cannot be reported skipped,
+# and a skipped one cannot be reported completed or modified. "unknown" is allowed
+# against either — declining to characterise an outcome contradicts nothing.
+_COHERENT_OUTCOMES: dict[SessionStatus, frozenset[str]] = {
+    SessionStatus.COMPLETED: frozenset({"completed", "modified", "unknown"}),
+    SessionStatus.SKIPPED: frozenset({"skipped", "unknown"}),
+}
+
 
 async def create_feedback(
     db: AsyncSession, user_id: int, payload: SessionFeedbackIn
@@ -63,7 +73,22 @@ async def create_feedback(
             ),
         )
 
-    # 2. If a completed workout log is referenced, it must belong to the caller too.
+    # 1c. The report must not contradict what the session says happened.
+    allowed = _COHERENT_OUTCOMES.get(planned_session.status, frozenset())
+    if payload.status not in allowed:
+        raise HTTPException(
+            status_code=409,
+            detail=(
+                f"Session is {planned_session.status.value}; "
+                f"feedback status must be one of {sorted(allowed)}"
+            ),
+        )
+
+    # 2. If a completed workout log is referenced, it must belong to the caller AND
+    # be the log this session was actually fulfilled by. Ownership alone is not
+    # enough — it would let an athlete attach any of their own workouts to any of
+    # their own sessions, making the link mean nothing to anything that later
+    # trusts it.
     if payload.completed_workout_log_id is not None:
         workout_log = (
             await db.execute(
@@ -75,6 +100,11 @@ async def create_feedback(
         ).scalars().first()
         if workout_log is None:
             raise HTTPException(status_code=404, detail="Workout log not found")
+        if planned_session.workout_log_id != workout_log.id:
+            raise HTTPException(
+                status_code=409,
+                detail="That workout log did not fulfill this planned session",
+            )
 
     # 3. Feedback is one-per-session (planned_session_id is unique).
     existing = (

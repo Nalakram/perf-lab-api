@@ -99,6 +99,10 @@ async def test_create_feedback_persists_reported_fields(http_client, async_db):
 
     ps = await _mk_planned_session(async_db, user_id)
     wl = await _mk_workout_log(async_db, user_id)
+    # Mirror what logging actually does: `state_service.process_new_workout` links
+    # the log to the session it fulfilled. Feedback may only reference that link.
+    ps.workout_log_id = wl.id
+    await async_db.commit()
 
     resp = await http_client.post(
         "/v1/feedback",
@@ -281,3 +285,60 @@ async def test_list_feedback_returns_only_the_callers_rows(http_client, async_db
 
 async def test_list_feedback_unauthenticated(http_client):
     assert (await http_client.get("/v1/feedback")).status_code == 401
+
+
+async def test_a_workout_log_that_did_not_fulfill_this_session_is_refused(http_client, async_db):
+    """Owning the log is not enough — it must be *this* session's log.
+
+    Ownership alone would let an athlete attach any of their own workouts to any of
+    their own sessions, which makes the link meaningless to anything that later
+    trusts it.
+    """
+    token = await _register_and_get_token(http_client, "fb_wronglog@test.com", "securepass1")
+    hdr = {"Authorization": f"Bearer {token}"}
+    uid = await _current_user_id(http_client, hdr)
+
+    ps = await _mk_planned_session(async_db, uid)
+    unrelated = await _mk_workout_log(async_db, uid)  # the athlete's, but not this session's
+
+    resp = await http_client.post(
+        "/v1/feedback",
+        json={
+            "planned_session_id": ps.id,
+            "completed_workout_log_id": unrelated.id,
+            "status": "completed",
+        },
+        headers=hdr,
+    )
+    assert resp.status_code == 409, resp.text
+
+
+async def test_feedback_may_not_contradict_what_the_session_says_happened(http_client, async_db):
+    """`PlannedSession.status` owns occurrence, so a contradicting report is refused."""
+    token = await _register_and_get_token(http_client, "fb_contradict@test.com", "securepass1")
+    hdr = {"Authorization": f"Bearer {token}"}
+    uid = await _current_user_id(http_client, hdr)
+
+    completed = await _mk_planned_session(async_db, uid)
+    resp = await http_client.post(
+        "/v1/feedback",
+        json={"planned_session_id": completed.id, "status": "skipped"},
+        headers=hdr,
+    )
+    assert resp.status_code == 409, resp.text
+
+    skipped = await _mk_planned_session(async_db, uid, status=SessionStatus.SKIPPED)
+    resp = await http_client.post(
+        "/v1/feedback",
+        json={"planned_session_id": skipped.id, "status": "completed"},
+        headers=hdr,
+    )
+    assert resp.status_code == 409, resp.text
+
+    # "unknown" contradicts nothing, so it is accepted against either.
+    ok = await http_client.post(
+        "/v1/feedback",
+        json={"planned_session_id": skipped.id, "status": "unknown"},
+        headers=hdr,
+    )
+    assert ok.status_code == 201, ok.text
