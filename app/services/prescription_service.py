@@ -450,6 +450,20 @@ async def _gather_prescription_context(
         active_block = block_result.scalars().first()
 
     block_context: BlockContext = BlockContext()
+    if active_block:
+        # Adherence is a property of the BLOCK, not of today's slot, so it loads
+        # whenever a block is active. Gating it on `target_session` made it
+        # unreachable in precisely the situation it exists for: the athlete
+        # finishes today's session — which leaves nothing PENDING, so
+        # `get_today_session` returns None — reports how it went, and asks what to
+        # do next. The `else` branch above already resolves the active block for
+        # that case; this is where that resolution is finally used.
+        #
+        # Deliberately the ONLY field lifted out of the guard below. The others are
+        # either slot-specific, or would change goal precedence
+        # (`resolve_effective_goal` ranks `block_goal` above the `goal` query
+        # param), which is not this change's business.
+        block_context.update(**await block_adherence_signals(db, user_id, active_block.id))
     if active_block and target_session:
         block_context.update(
             block_goal=active_block.goal.value,
@@ -460,7 +474,6 @@ async def _gather_prescription_context(
             duration_weeks=active_block.duration_weeks,
             deload_every_n_weeks=active_block.deload_every_n_weeks,
             deload_volume_factor=active_block.deload_volume_factor,
-            **await block_adherence_signals(db, user_id, active_block.id),
             target_session_minutes=active_block.target_session_minutes,
             accessory_emphasis=active_block.accessory_emphasis,
             accessory_focus=active_block.accessory_focus,

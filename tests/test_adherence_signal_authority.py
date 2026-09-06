@@ -26,7 +26,9 @@ from app.models.user import User
 from app.schemas.state import UnifiedStateVector
 from app.services.planning_service import block_adherence_signals
 
-pytestmark = pytest.mark.asyncio
+# Mixed sync/async module: the DB-backed tests need the marker, the pure prescriber
+# tests must not have it (see tests/test_profile_write_boundary.py for the idiom).
+_asyncio = pytest.mark.asyncio
 
 
 async def _mk_user(db, email: str) -> User:
@@ -85,6 +87,7 @@ async def _mk_feedback(db, planned_session_id: int, **flags) -> SessionFeedback:
 # --- The double-count seam ---------------------------------------------------
 
 
+@_asyncio
 async def test_a_skipped_session_the_athlete_also_called_modified_counts_once(async_db):
     """The failure this whole contract exists to prevent.
 
@@ -103,6 +106,7 @@ async def test_a_skipped_session_the_athlete_also_called_modified_counts_once(as
     assert signals["recent_modifications"] == 0
 
 
+@_asyncio
 async def test_status_wins_over_the_report_because_occurrence_is_its_to_own(async_db):
     """A completed session reported as modified is a modification, not a skip."""
     user = await _mk_user(async_db, "adh-completed@test.com")
@@ -116,6 +120,7 @@ async def test_status_wins_over_the_report_because_occurrence_is_its_to_own(asyn
     assert signals["recent_modifications"] == 1
 
 
+@_asyncio
 async def test_an_unmodified_completed_session_is_not_friction(async_db):
     user = await _mk_user(async_db, "adh-clean@test.com")
     block = await _mk_block(async_db, user.id)
@@ -127,6 +132,7 @@ async def test_an_unmodified_completed_session_is_not_friction(async_db):
     assert signals == {"recent_skips": 0, "recent_modifications": 0}
 
 
+@_asyncio
 async def test_a_session_with_no_feedback_at_all_still_counts_its_skip(async_db):
     """Feedback is advisory; its absence must not erase what status already knows."""
     user = await _mk_user(async_db, "adh-nofb@test.com")
@@ -141,6 +147,7 @@ async def test_a_session_with_no_feedback_at_all_still_counts_its_skip(async_db)
 # --- Scope: recency is the block, derived from the session -------------------
 
 
+@_asyncio
 async def test_another_blocks_sessions_do_not_leak_in(async_db):
     """Recency is block membership. An older block's friction is not today's."""
     user = await _mk_user(async_db, "adh-scope@test.com")
@@ -154,6 +161,7 @@ async def test_another_blocks_sessions_do_not_leak_in(async_db):
     assert signals == {"recent_skips": 0, "recent_modifications": 0}
 
 
+@_asyncio
 async def test_another_athletes_block_does_not_leak_in(async_db):
     mine = await _mk_user(async_db, "adh-mine@test.com")
     theirs = await _mk_user(async_db, "adh-theirs@test.com")
@@ -163,6 +171,82 @@ async def test_another_athletes_block_does_not_leak_in(async_db):
     signals = await block_adherence_signals(async_db, mine.id, their_block.id)
 
     assert signals == {"recent_skips": 0, "recent_modifications": 0}
+
+
+# --- End to end: does a report actually reach the next prescription? ---------
+
+
+async def _register(client, email: str) -> tuple[dict, int]:
+    reg = await client.post("/auth/register", json={"email": email, "password": "securepass1"})
+    assert reg.status_code == 201, reg.text
+    tok = await client.post(
+        "/auth/token",
+        data={"username": email, "password": "securepass1"},
+        headers={"Content-Type": "application/x-www-form-urlencoded"},
+    )
+    assert tok.status_code == 200, tok.text
+    hdr = {"Authorization": f"Bearer {tok.json()['access_token']}"}
+    me = await client.get("/auth/me", headers=hdr)
+    assert me.status_code == 200, me.text
+    return hdr, me.json()["id"]
+
+
+@_asyncio
+async def test_a_reported_modification_reaches_the_next_prescription(http_client, async_db):
+    """The whole point of the feature, asserted through the route an athlete uses.
+
+    The unit tests above pass hand-built context to the prescriber, so they cannot
+    see whether real feedback ever *becomes* that context. This walks the actual
+    path: finish sessions, report them, ask what to do next.
+
+    The setup deliberately leaves NOTHING pending — that is the real situation
+    after an athlete trains, and it is where the signal used to vanish, because
+    block context was gated on `get_today_session` finding a PENDING row.
+    """
+    hdr, uid = await _register(http_client, "adh-e2e@test.com")
+    block = await _mk_block(async_db, uid)
+
+    # Four completed-but-changed sessions. Four, because a modification is
+    # deliberately weighted at half a skip, so this is the first count that clears
+    # the bias threshold on modifications alone.
+    for day in range(1, 5):
+        ps = await _mk_session(async_db, uid, block.id, SessionStatus.COMPLETED, day=day)
+        resp = await http_client.post(
+            "/v1/feedback",
+            json={"planned_session_id": ps.id, "status": "modified", "modified_volume": True},
+            headers=hdr,
+        )
+        assert resp.status_code == 201, resp.text
+
+    rx = await http_client.get("/v1/next-session", headers=hdr)
+    assert rx.status_code == 200, rx.text
+    applied = rx.json()["why"]["constraints_applied"]
+
+    assert "adherence:recent_modifications=4" in applied, applied
+    # And it is reported as a modification, not silently folded into skips.
+    assert not any("recent_skips" in c for c in applied), applied
+
+
+@_asyncio
+async def test_a_clean_block_reaches_the_prescription_with_no_adherence_claim(
+    http_client, async_db
+):
+    """The negative half — the route must not invent friction that was never reported."""
+    hdr, uid = await _register(http_client, "adh-e2e-clean@test.com")
+    block = await _mk_block(async_db, uid)
+    for day in range(1, 5):
+        ps = await _mk_session(async_db, uid, block.id, SessionStatus.COMPLETED, day=day)
+        resp = await http_client.post(
+            "/v1/feedback",
+            json={"planned_session_id": ps.id, "status": "completed"},
+            headers=hdr,
+        )
+        assert resp.status_code == 201, resp.text
+
+    rx = await http_client.get("/v1/next-session", headers=hdr)
+    assert rx.status_code == 200, rx.text
+    applied = rx.json()["why"]["constraints_applied"]
+    assert not any("adherence:" in c for c in applied), applied
 
 
 # --- Prescriber consequence --------------------------------------------------

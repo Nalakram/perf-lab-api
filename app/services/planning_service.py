@@ -283,7 +283,12 @@ async def block_adherence_signals(
     unique — so each planned session yields exactly one row and the counts are
     deduplicated by construction rather than by a DISTINCT.
     """
+    # A report of "modified" counts even when the athlete named no dimension.
+    # Normalising here rather than refusing the write keeps an honest but
+    # under-specified report as evidence: "I changed it" is friction whether or not
+    # they said which part, and the alternative silently discards it.
     modified = or_(
+        SessionFeedback.status == "modified",
         SessionFeedback.modified_volume.is_(True),
         SessionFeedback.modified_intensity.is_(True),
         SessionFeedback.modified_exercises.is_(True),
